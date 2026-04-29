@@ -7,25 +7,42 @@
  * Requires a Slack Bot Token with channels:history, channels:read scopes.
  */
 
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import { z } from 'zod';
 import type { EpisodeInput } from '../types.js';
-import type { Connector, SyncOptions } from './types.js';
+import type { SyncOptions } from './types.js';
+import { AbstractConnector } from './base.js';
 
-export class SlackConnector implements Connector {
-  id = 'slack';
-  name = 'Slack';
+export const SlackConfigSchema = z.object({
+  token: z.string().min(1, 'Bot User OAuth Token is required'),
+  /** Signing secret for webhook signature verification. Required for handleWebhook. */
+  signingSecret: z.string().optional(),
+});
 
-  private token = '';
+export type SlackConfig = z.infer<typeof SlackConfigSchema>;
+
+interface SlackResponse {
+  ok: boolean;
+  error?: string;
+  [key: string]: unknown;
+}
+
+export class SlackConnector extends AbstractConnector<SlackConfig> {
+  readonly id = 'slack';
+  readonly name = 'Slack';
+  readonly configSchema = SlackConfigSchema;
+
   private baseUrl = 'https://slack.com/api';
-  private groupId?: string;
 
-  async init(config: Record<string, unknown>): Promise<void> {
-    this.token = config.token as string;
-    if (!this.token) throw new Error('SlackConnector requires token (Bot User OAuth Token)');
-    if (config.groupId) this.groupId = config.groupId as string;
+  constructor() {
+    // Slack rate limit: ~50 req/min for most endpoints
+    super({ rateLimitMs: 1200, maxRetries: 3 });
+  }
 
-    // Verify token
-    const res = await this.slackApi('auth.test');
+  async setup(config: SlackConfig): Promise<void> {
+    const res = await this.slackApi<SlackResponse>('auth.test');
     if (!res.ok) throw new Error(`Slack auth failed: ${res.error}`);
+    this.log('info', `Authenticated as ${(res as any).user}`);
   }
 
   async sync(options?: SyncOptions): Promise<EpisodeInput[]> {
@@ -34,7 +51,6 @@ export class SlackConnector implements Connector {
     const since = options?.since;
     const episodes: EpisodeInput[] = [];
 
-    // Get channels to sync
     const channels = channel
       ? [{ id: channel, name: channel }]
       : await this.listChannels();
@@ -62,11 +78,17 @@ export class SlackConnector implements Connector {
       }
     }
 
+    this.log('info', `Synced ${episodes.length} messages from ${channels.length} channels`);
     return episodes;
   }
 
-  async handleWebhook(payload: unknown): Promise<EpisodeInput[]> {
+  async handleWebhook(payload: unknown, headers?: Record<string, string>): Promise<EpisodeInput[]> {
     const body = payload as any;
+
+    // Verify signature if signing secret is configured
+    if (this.config.signingSecret && headers) {
+      this.verifySignature(body, headers);
+    }
 
     // URL verification challenge
     if (body.type === 'url_verification') return [];
@@ -94,27 +116,51 @@ export class SlackConnector implements Connector {
     return [];
   }
 
-  // ─── Slack API Helpers ───────────────────────────────────
+  private verifySignature(body: unknown, headers: Record<string, string>): void {
+    const timestamp = headers['x-slack-request-timestamp'];
+    const signature = headers['x-slack-signature'];
+    if (!timestamp || !signature) {
+      throw new Error('Missing Slack signature headers');
+    }
 
-  private async slackApi(method: string, params?: Record<string, string>): Promise<any> {
+    // Reject requests older than 5 minutes
+    const now = Math.floor(Date.now() / 1000);
+    if (Math.abs(now - Number(timestamp)) > 300) {
+      throw new Error('Slack request timestamp too old');
+    }
+
+    const sigBasestring = `v0:${timestamp}:${typeof body === 'string' ? body : JSON.stringify(body)}`;
+    const mySignature = 'v0=' + createHmac('sha256', this.config.signingSecret!)
+      .update(sigBasestring)
+      .digest('hex');
+
+    const sigBuffer = Buffer.from(signature);
+    const myBuffer = Buffer.from(mySignature);
+    if (sigBuffer.length !== myBuffer.length || !timingSafeEqual(sigBuffer, myBuffer)) {
+      throw new Error('Invalid Slack webhook signature');
+    }
+  }
+
+  private async slackApi<T = SlackResponse>(method: string, params?: Record<string, string>): Promise<T> {
     const url = new URL(`${this.baseUrl}/${method}`);
     if (params) {
       for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
     }
 
-    const res = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${this.token}` },
+    return this.fetchJson<T>(url, {
+      headers: { Authorization: `Bearer ${this.config.token}` },
     });
-    return res.json();
   }
 
   private async listChannels(): Promise<Array<{ id: string; name: string }>> {
-    const res = await this.slackApi('conversations.list', {
+    const res = await this.slackApi<any>('conversations.list', {
       types: 'public_channel,private_channel',
       limit: '200',
     });
-    if (!res.ok) return [];
-
+    if (!res.ok) {
+      this.log('error', 'Failed to list channels', res.error);
+      return [];
+    }
     return res.channels.map((ch: any) => ({ id: ch.id, name: ch.name }));
   }
 
@@ -131,8 +177,11 @@ export class SlackConnector implements Connector {
     if (since) params.oldest = String(since.getTime() / 1000);
     if (cursor) params.cursor = cursor;
 
-    const res = await this.slackApi('conversations.history', params);
-    if (!res.ok) return [];
+    const res = await this.slackApi<any>('conversations.history', params);
+    if (!res.ok) {
+      this.log('error', `Failed to fetch messages from ${channel}`, res.error);
+      return [];
+    }
     return res.messages || [];
   }
 }

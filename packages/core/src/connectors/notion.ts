@@ -5,26 +5,34 @@
  * Requires a Notion integration token with read access to target databases.
  */
 
+import { z } from 'zod';
 import type { EpisodeInput } from '../types.js';
-import type { Connector, SyncOptions } from './types.js';
+import type { SyncOptions } from './types.js';
+import { AbstractConnector } from './base.js';
 
-export class NotionConnector implements Connector {
-  id = 'notion';
-  name = 'Notion';
+export const NotionConfigSchema = z.object({
+  token: z.string().min(1, 'Internal Integration Token is required'),
+});
 
-  private token = '';
+export type NotionConfig = z.infer<typeof NotionConfigSchema>;
+
+export class NotionConnector extends AbstractConnector<NotionConfig> {
+  readonly id = 'notion';
+  readonly name = 'Notion';
+  readonly configSchema = NotionConfigSchema;
+
   private baseUrl = 'https://api.notion.com/v1';
   private apiVersion = '2022-06-28';
-  private groupId?: string;
 
-  async init(config: Record<string, unknown>): Promise<void> {
-    this.token = config.token as string;
-    if (!this.token) throw new Error('NotionConnector requires token (Internal Integration Token)');
-    if (config.groupId) this.groupId = config.groupId as string;
+  constructor() {
+    // Notion rate limit: 3 requests/sec
+    super({ rateLimitMs: 350, maxRetries: 3 });
+  }
 
-    // Verify token
-    const res = await this.notionApi('GET', '/users/me');
+  async setup(config: NotionConfig): Promise<void> {
+    const res = await this.notionApi<any>('GET', '/users/me');
     if (!res.object) throw new Error('Notion auth failed');
+    this.log('info', `Authenticated as ${res.name || res.id}`);
   }
 
   async sync(options?: SyncOptions): Promise<EpisodeInput[]> {
@@ -33,38 +41,33 @@ export class NotionConnector implements Connector {
     const since = options?.since;
     const episodes: EpisodeInput[] = [];
 
-    if (databaseId) {
-      // Sync specific database
-      const pages = await this.queryDatabase(databaseId, limit, since, options?.cursor);
-      for (const page of pages) {
+    const pages = databaseId
+      ? await this.queryDatabase(databaseId, limit, since, options?.cursor)
+      : await this.searchPages(limit, since);
+
+    for (const page of pages) {
+      try {
         const episode = await this.pageToEpisode(page);
         if (episode) episodes.push(episode);
-      }
-    } else {
-      // Search all accessible pages
-      const pages = await this.searchPages(limit, since);
-      for (const page of pages) {
-        const episode = await this.pageToEpisode(page);
-        if (episode) episodes.push(episode);
+      } catch (err) {
+        this.log('warn', `Failed to convert page ${page.id}`, err);
       }
     }
 
+    this.log('info', `Synced ${episodes.length} pages`);
     return episodes;
   }
 
-  // ─── Notion API Helpers ──────────────────────────────────
-
-  private async notionApi(method: string, path: string, body?: unknown): Promise<any> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+  private async notionApi<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+    return this.fetchJson<T>(`${this.baseUrl}${path}`, {
       method,
       headers: {
-        'Authorization': `Bearer ${this.token}`,
+        'Authorization': `Bearer ${this.config.token}`,
         'Notion-Version': this.apiVersion,
         'Content-Type': 'application/json',
       },
       body: body ? JSON.stringify(body) : undefined,
     });
-    return res.json();
   }
 
   private async queryDatabase(
@@ -73,37 +76,37 @@ export class NotionConnector implements Connector {
     since?: Date,
     cursor?: string,
   ): Promise<any[]> {
-    const filter = since
-      ? { filter: { timestamp: 'last_edited_time', last_edited_time: { after: since.toISOString() } } }
-      : {};
-
-    const res = await this.notionApi('POST', `/databases/${databaseId}/query`, {
-      ...filter,
+    const body: any = {
       page_size: Math.min(limit, 100),
-      start_cursor: cursor,
-    });
+    };
+    if (cursor) body.start_cursor = cursor;
+    if (since) {
+      body.filter = {
+        timestamp: 'last_edited_time',
+        last_edited_time: { after: since.toISOString() },
+      };
+    }
 
+    const res = await this.notionApi<any>('POST', `/databases/${databaseId}/query`, body);
     return res.results || [];
   }
 
   private async searchPages(limit: number, since?: Date): Promise<any[]> {
-    const filter = since
-      ? { filter: { property: 'object', value: 'page' }, sort: { direction: 'descending', timestamp: 'last_edited_time' } }
-      : { filter: { property: 'object', value: 'page' } };
-
-    const res = await this.notionApi('POST', '/search', {
-      ...filter,
+    const body: any = {
+      filter: { property: 'object', value: 'page' },
       page_size: Math.min(limit, 100),
-    });
+    };
+    if (since) {
+      body.sort = { direction: 'descending', timestamp: 'last_edited_time' };
+    }
 
+    const res = await this.notionApi<any>('POST', '/search', body);
     return res.results || [];
   }
 
   private async pageToEpisode(page: any): Promise<EpisodeInput | null> {
-    // Get page content as blocks
     const blocks = await this.getPageBlocks(page.id);
     const content = this.blocksToText(blocks);
-
     if (!content.trim()) return null;
 
     const title = this.getPageTitle(page);
@@ -125,22 +128,47 @@ export class NotionConnector implements Connector {
   }
 
   private async getPageBlocks(pageId: string): Promise<any[]> {
-    const res = await this.notionApi('GET', `/blocks/${pageId}/children?page_size=100`);
-    return res.results || [];
+    const allBlocks: any[] = [];
+    let cursor: string | undefined;
+
+    // Paginate through all blocks
+    do {
+      const params = cursor ? `?page_size=100&start_cursor=${cursor}` : '?page_size=100';
+      const res = await this.notionApi<any>('GET', `/blocks/${pageId}/children${params}`);
+      allBlocks.push(...(res.results || []));
+      cursor = res.has_more ? res.next_cursor : undefined;
+    } while (cursor);
+
+    // Fetch children of blocks that have them (toggles, etc.)
+    for (const block of allBlocks) {
+      if (block.has_children && block.type !== 'child_page' && block.type !== 'child_database') {
+        try {
+          const children = await this.getPageBlocks(block.id);
+          block._children = children;
+        } catch {
+          // Skip blocks we can't access
+        }
+      }
+    }
+
+    return allBlocks;
   }
 
-  private blocksToText(blocks: any[]): string {
+  private blocksToText(blocks: any[], indent = ''): string {
     const lines: string[] = [];
 
     for (const block of blocks) {
-      const text = this.extractBlockText(block);
+      const text = this.extractBlockText(block, indent);
       if (text) lines.push(text);
+      if (block._children) {
+        lines.push(this.blocksToText(block._children, indent + '  '));
+      }
     }
 
     return lines.join('\n');
   }
 
-  private extractBlockText(block: any): string {
+  private extractBlockText(block: any, indent: string): string {
     const type = block.type;
     const data = block[type];
     if (!data) return '';
@@ -148,22 +176,34 @@ export class NotionConnector implements Connector {
     // Rich text blocks
     if (data.rich_text) {
       const text = data.rich_text.map((t: any) => t.plain_text).join('');
-
       switch (type) {
         case 'heading_1': return `# ${text}`;
         case 'heading_2': return `## ${text}`;
         case 'heading_3': return `### ${text}`;
-        case 'bulleted_list_item': return `- ${text}`;
-        case 'numbered_list_item': return `1. ${text}`;
-        case 'to_do': return `- [${data.checked ? 'x' : ' '}] ${text}`;
-        case 'toggle': return `> ${text}`;
-        case 'quote': return `> ${text}`;
-        case 'code': return `\`\`\`\n${text}\n\`\`\``;
-        default: return text;
+        case 'bulleted_list_item': return `${indent}- ${text}`;
+        case 'numbered_list_item': return `${indent}1. ${text}`;
+        case 'to_do': return `${indent}- [${data.checked ? 'x' : ' '}] ${text}`;
+        case 'toggle': return `${indent}> ${text}`;
+        case 'quote': return `${indent}> ${text}`;
+        case 'code': return `\`\`\`${data.language || ''}\n${text}\n\`\`\``;
+        case 'callout': return `> ${data.icon?.emoji || ''} ${text}`;
+        default: return `${indent}${text}`;
       }
     }
 
-    return '';
+    // Non-rich-text blocks
+    switch (type) {
+      case 'divider': return '---';
+      case 'table_of_contents': return '';
+      case 'breadcrumb': return '';
+      case 'image': return `![image](${data.file?.url || data.external?.url || ''})`;
+      case 'video': return `[video](${data.file?.url || data.external?.url || ''})`;
+      case 'file': return `[file](${data.file?.url || data.external?.url || ''})`;
+      case 'bookmark': return `[bookmark](${data.url || ''})`;
+      case 'embed': return `[embed](${data.url || ''})`;
+      case 'equation': return `$$${data.expression || ''}$$`;
+      default: return '';
+    }
   }
 
   private getPageTitle(page: any): string {

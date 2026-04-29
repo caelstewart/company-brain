@@ -1,53 +1,74 @@
 /**
  * Filesystem / Markdown Connector.
  *
- * Watches a directory of markdown files and ingests them as episodes.
+ * Watches a directory of markdown/text files and ingests them as episodes.
  * Supports incremental sync via file modification times.
  */
 
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, extname, relative } from 'node:path';
+import { z } from 'zod';
 import type { EpisodeInput } from '../types.js';
-import type { Connector, SyncOptions } from './types.js';
+import type { SyncOptions } from './types.js';
+import { AbstractConnector } from './base.js';
 
-export class FilesystemConnector implements Connector {
-  id = 'filesystem';
-  name = 'Filesystem / Markdown';
+export const FilesystemConfigSchema = z.object({
+  rootDir: z.string().min(1, 'rootDir is required'),
+  extensions: z.array(z.string()).optional().default(['.md', '.txt', '.markdown']),
+});
 
-  private rootDir = '';
-  private extensions = ['.md', '.txt', '.markdown'];
-  private groupId?: string;
+export type FilesystemConfig = z.infer<typeof FilesystemConfigSchema>;
 
-  async init(config: Record<string, unknown>): Promise<void> {
-    this.rootDir = config.rootDir as string;
-    if (!this.rootDir) throw new Error('FilesystemConnector requires rootDir');
+export class FilesystemConnector extends AbstractConnector<FilesystemConfig> {
+  readonly id = 'filesystem';
+  readonly name = 'Filesystem / Markdown';
+  readonly configSchema = FilesystemConfigSchema;
 
-    if (config.extensions) this.extensions = config.extensions as string[];
-    if (config.groupId) this.groupId = config.groupId as string;
-
-    // Verify directory exists
-    await stat(this.rootDir);
+  async setup(config: FilesystemConfig): Promise<void> {
+    try {
+      const s = await stat(config.rootDir);
+      if (!s.isDirectory()) {
+        throw new Error(`${config.rootDir} is not a directory`);
+      }
+    } catch (err: any) {
+      if (err.code === 'ENOENT') throw new Error(`Directory not found: ${config.rootDir}`);
+      throw err;
+    }
   }
 
   async sync(options?: SyncOptions): Promise<EpisodeInput[]> {
     const since = options?.since;
     const limit = options?.limit ?? 1000;
-    const files = await this.walkDir(this.rootDir);
+    const files = await this.walkDir(this.config.rootDir);
     const episodes: EpisodeInput[] = [];
 
     for (const file of files) {
       if (episodes.length >= limit) break;
 
-      const fileStat = await stat(file);
+      const ext = extname(file).toLowerCase();
+      if (!this.config.extensions.includes(ext)) continue;
+
+      let fileStat;
+      try {
+        fileStat = await stat(file);
+      } catch (err) {
+        this.log('warn', `Could not stat file: ${file}`, err);
+        continue;
+      }
+
       if (since && fileStat.mtime < since) continue;
 
-      const ext = extname(file).toLowerCase();
-      if (!this.extensions.includes(ext)) continue;
+      let content;
+      try {
+        content = await readFile(file, 'utf-8');
+      } catch (err) {
+        this.log('warn', `Could not read file: ${file}`, err);
+        continue;
+      }
 
-      const content = await readFile(file, 'utf-8');
       if (!content.trim()) continue;
 
-      const relativePath = relative(this.rootDir, file);
+      const relativePath = relative(this.config.rootDir, file);
 
       episodes.push({
         content,
@@ -63,18 +84,26 @@ export class FilesystemConnector implements Connector {
       });
     }
 
+    this.log('info', `Synced ${episodes.length} files from ${this.config.rootDir}`);
     return episodes;
   }
 
   private async walkDir(dir: string): Promise<string[]> {
-    const entries = await readdir(dir, { withFileTypes: true });
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      this.log('warn', `Could not read directory: ${dir}`, err);
+      return [];
+    }
+
     const files: string[] = [];
 
     for (const entry of entries) {
-      const full = join(dir, entry.name);
       if (entry.name.startsWith('.')) continue;
       if (entry.name === 'node_modules') continue;
 
+      const full = join(dir, entry.name);
       if (entry.isDirectory()) {
         files.push(...await this.walkDir(full));
       } else if (entry.isFile()) {

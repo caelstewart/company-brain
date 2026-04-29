@@ -1,5 +1,10 @@
+export { AbstractConnector } from './base.js';
+export type { ConnectorOptions } from './base.js';
 export { ConnectorRegistry } from './registry.js';
-export { FilesystemConnector } from './filesystem.js';
-export { SlackConnector } from './slack.js';
-export { NotionConnector } from './notion.js';
+export { FilesystemConnector, FilesystemConfigSchema } from './filesystem.js';
+export type { FilesystemConfig } from './filesystem.js';
+export { SlackConnector, SlackConfigSchema } from './slack.js';
+export type { SlackConfig } from './slack.js';
+export { NotionConnector, NotionConfigSchema } from './notion.js';
+export type { NotionConfig } from './notion.js';
 export type { Connector, SyncOptions, SyncResult, ConnectorConfig } from './types.js';

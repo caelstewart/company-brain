@@ -1,7 +1,8 @@
 /**
  * Connector Registry.
  *
- * Manages connector instances and orchestrates sync operations.
+ * Manages connector instances, orchestrates sync operations,
+ * and persists sync state (cursors, timestamps) across restarts.
  */
 
 import type { Brain } from '../index.js';
@@ -14,7 +15,7 @@ export class ConnectorRegistry {
   constructor(private brain: Brain) {}
 
   /**
-   * Register a connector type.
+   * Register a connector type. Call this once per connector class.
    */
   register(connector: Connector): void {
     this.connectors.set(connector.id, connector);
@@ -26,7 +27,7 @@ export class ConnectorRegistry {
   async connect(config: ConnectorConfig): Promise<void> {
     const connector = this.connectors.get(config.type);
     if (!connector) {
-      throw new Error(`Unknown connector type: ${config.type}. Register it first.`);
+      throw new Error(`Unknown connector type: ${config.type}. Register it first with registry.register().`);
     }
 
     await connector.init(config.config);
@@ -34,7 +35,11 @@ export class ConnectorRegistry {
   }
 
   /**
-   * Sync a specific connector and ingest results.
+   * Sync a connector and ingest results.
+   *
+   * If no `since` is provided in options, uses the last sync timestamp
+   * from persistent state (stored in Postgres). After sync, saves the
+   * new timestamp so the next sync only fetches new data.
    */
   async sync(connectorId: string, options?: SyncOptions): Promise<SyncResult> {
     const config = this.configs.get(connectorId);
@@ -43,28 +48,25 @@ export class ConnectorRegistry {
     const connector = this.connectors.get(config.type);
     if (!connector) throw new Error(`Connector type not registered: ${config.type}`);
 
-    const episodes = await connector.sync(options);
-    let ingested = 0;
-    let errors = 0;
-
-    for (const episode of episodes) {
-      try {
-        await this.brain.ingest({
-          ...episode,
-          groupId: episode.groupId || config.groupId,
-        });
-        ingested++;
-      } catch (err) {
-        errors++;
-        console.error(`Connector ${connectorId} ingest error:`, err);
+    // Load last sync state for incremental sync
+    const syncOpts = { ...options };
+    if (!syncOpts.since) {
+      const state = await this.brain.getSyncState(connectorId);
+      if (state?.lastSyncAt) {
+        syncOpts.since = state.lastSyncAt;
       }
     }
 
-    return {
-      connector: connectorId,
-      episodes: ingested,
-      errors,
-    };
+    const episodes = await connector.sync(syncOpts);
+    const result = await this.ingestEpisodes(connectorId, episodes, config.groupId);
+
+    // Persist sync state
+    await this.brain.setSyncState(connectorId, {
+      lastSyncAt: new Date(),
+      metadata: { episodes: result.episodes, errors: result.errors },
+    });
+
+    return result;
   }
 
   /**
@@ -73,7 +75,12 @@ export class ConnectorRegistry {
   async syncAll(options?: SyncOptions): Promise<SyncResult[]> {
     const results: SyncResult[] = [];
     for (const id of this.configs.keys()) {
-      results.push(await this.sync(id, options));
+      try {
+        results.push(await this.sync(id, options));
+      } catch (err) {
+        console.error(`[registry] Failed to sync connector ${id}:`, err);
+        results.push({ connector: id, episodes: 0, errors: 1 });
+      }
     }
     return results;
   }
@@ -91,32 +98,42 @@ export class ConnectorRegistry {
     if (!connector.handleWebhook) throw new Error(`Connector ${connectorType} does not support webhooks`);
 
     const episodes = await connector.handleWebhook(payload, headers);
+    return this.ingestEpisodes(connectorType, episodes);
+  }
+
+  listTypes(): string[] {
+    return Array.from(this.connectors.keys());
+  }
+
+  listConfigured(): ConnectorConfig[] {
+    return Array.from(this.configs.values());
+  }
+
+  /**
+   * Shared ingest loop. Episodes are ingested one at a time so that
+   * a single failure does not block the rest.
+   */
+  private async ingestEpisodes(
+    connectorId: string,
+    episodes: import('../types.js').EpisodeInput[],
+    groupId?: string,
+  ): Promise<SyncResult> {
     let ingested = 0;
     let errors = 0;
 
     for (const episode of episodes) {
       try {
-        await this.brain.ingest(episode);
+        await this.brain.ingest({
+          ...episode,
+          groupId: episode.groupId || groupId,
+        });
         ingested++;
       } catch (err) {
         errors++;
+        console.error(`[registry:${connectorId}] Ingest error:`, err);
       }
     }
 
-    return { connector: connectorType, episodes: ingested, errors };
-  }
-
-  /**
-   * List all registered connector types.
-   */
-  listTypes(): string[] {
-    return Array.from(this.connectors.keys());
-  }
-
-  /**
-   * List all configured connector instances.
-   */
-  listConfigured(): ConnectorConfig[] {
-    return Array.from(this.configs.values());
+    return { connector: connectorId, episodes: ingested, errors };
   }
 }

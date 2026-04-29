@@ -21,13 +21,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "postgres": "^3.4.0",
+    "@anthropic-ai/sdk": "^0.30.0",
     "openai": "^4.50.0",
-    "@anthropic-ai/sdk": "^0.30.0"
+    "postgres": "^3.4.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "typescript": "^5.5.0",
-    "vitest": "^2.0.0",
-    "@types/node": "^22.0.0"
+    "vitest": "^2.0.0"
   }
 }

@@ -46,8 +46,8 @@ export { search } from './search/index.js';
 export { extractAndResolve, getStats, suggestPatterns } from './extraction/index.js';
 export { SkillResolver, DEFAULT_SKILLS } from './skills/index.js';
 export type { Skill, SkillMatch, ResolverConfig } from './skills/index.js';
-export { ConnectorRegistry, FilesystemConnector, SlackConnector, NotionConnector } from './connectors/index.js';
-export type { Connector, SyncOptions, SyncResult, ConnectorConfig } from './connectors/index.js';
+export { AbstractConnector, ConnectorRegistry, FilesystemConnector, SlackConnector, NotionConnector } from './connectors/index.js';
+export type { ConnectorOptions, Connector, SyncOptions, SyncResult, ConnectorConfig } from './connectors/index.js';
 
 export class Brain {
   private db: postgres.Sql;
@@ -291,6 +291,55 @@ export class Brain {
    */
   async getSuggestedPatterns(minOccurrences?: number) {
     return suggestPatterns(this.db, this.groupId, minOccurrences);
+  }
+
+  /**
+   * Load persistent sync state for a connector.
+   * Used by ConnectorRegistry for incremental sync across restarts.
+   */
+  async getSyncState(connectorId: string): Promise<{
+    cursor?: string;
+    lastSyncAt?: Date;
+    metadata?: Record<string, unknown>;
+  } | null> {
+    const rows = await this.db`
+      SELECT cursor, last_sync_at, metadata
+      FROM connector_sync_state
+      WHERE connector_id = ${connectorId} AND group_id = ${this.groupId}
+    `.catch(() => []);
+    if (rows.length === 0) return null;
+    return {
+      cursor: rows[0].cursor ?? undefined,
+      lastSyncAt: rows[0].last_sync_at ?? undefined,
+      metadata: rows[0].metadata ?? {},
+    };
+  }
+
+  /**
+   * Save persistent sync state for a connector.
+   * Upserts so repeated calls just update the existing row.
+   */
+  async setSyncState(connectorId: string, state: {
+    cursor?: string;
+    lastSyncAt?: Date;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    await this.db`
+      INSERT INTO connector_sync_state (connector_id, group_id, cursor, last_sync_at, metadata, updated_at)
+      VALUES (
+        ${connectorId},
+        ${this.groupId},
+        ${state.cursor ?? null},
+        ${state.lastSyncAt ?? new Date()},
+        ${JSON.stringify(state.metadata || {})},
+        now()
+      )
+      ON CONFLICT (connector_id, group_id) DO UPDATE SET
+        cursor = EXCLUDED.cursor,
+        last_sync_at = EXCLUDED.last_sync_at,
+        metadata = EXCLUDED.metadata,
+        updated_at = now()
+    `.catch(() => {});
   }
 
   /**

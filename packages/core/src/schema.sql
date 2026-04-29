@@ -192,6 +192,21 @@ CREATE INDEX IF NOT EXISTS idx_aliases_alias_trgm ON entity_aliases USING GIN(al
 CREATE INDEX IF NOT EXISTS idx_aliases_entity ON entity_aliases(entity_id);
 
 -- ============================================================
+-- connector_sync_state: persistent cursor/timestamp for connectors
+-- ============================================================
+-- Tracks the last sync time and cursor per connector instance.
+-- Survives process restarts so incremental sync works across sessions.
+CREATE TABLE IF NOT EXISTS connector_sync_state (
+  connector_id  TEXT NOT NULL,
+  group_id      TEXT NOT NULL DEFAULT 'default',
+  cursor        TEXT,
+  last_sync_at  TIMESTAMPTZ,
+  metadata      JSONB NOT NULL DEFAULT '{}',
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (connector_id, group_id)
+);
+
+-- ============================================================
 -- Views for common queries
 -- ============================================================
 
