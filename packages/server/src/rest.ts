@@ -3,10 +3,17 @@
  *
  * Lightweight HTTP server using Node's built-in http module.
  * Exposes the Brain API as JSON endpoints with bearer token auth.
+ * Includes connector management and webhook endpoints.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { Brain } from '@company-brain/core';
+import {
+  Brain,
+  ConnectorRegistry,
+  FilesystemConnector,
+  SlackConnector,
+  NotionConnector,
+} from '@company-brain/core';
 import type { BrainConfig } from '@company-brain/core';
 
 interface RestConfig {
@@ -15,15 +22,21 @@ interface RestConfig {
   authToken?: string;
 }
 
-type RouteHandler = (body: any, params: URLSearchParams) => Promise<unknown>;
+type RouteHandler = (body: any, params: URLSearchParams, rawBody?: string, headers?: Record<string, string>) => Promise<unknown>;
 
 export async function startRestServer(brainConfig: BrainConfig, restConfig: RestConfig): Promise<void> {
   const brain = new Brain(brainConfig);
   await brain.init();
 
+  // Set up connector registry with built-in connectors
+  const registry = new ConnectorRegistry(brain);
+  registry.register(new FilesystemConnector());
+  registry.register(new SlackConnector());
+  registry.register(new NotionConnector());
+
   const routes = new Map<string, RouteHandler>();
 
-  // ─── Routes ──────────────────────────────────────────────────
+  // ─── Brain Routes ─────────────────────────────────────────
 
   routes.set('POST /api/ingest', async (body) => {
     return brain.ingest({
@@ -100,7 +113,44 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
     return { status: 'ok', version: '0.1.0' };
   });
 
-  // ─── Server ──────────────────────────────────────────────────
+  // ─── Connector Routes ─────────────────────────────────────
+
+  routes.set('POST /api/connectors', async (body) => {
+    if (!body.id || !body.type) {
+      throw new HttpError(400, 'Required fields: id, type, config');
+    }
+    await registry.connect({
+      id: body.id,
+      type: body.type,
+      config: body.config || {},
+      groupId: body.groupId,
+    });
+    return { ok: true, id: body.id, type: body.type };
+  });
+
+  routes.set('POST /api/connectors/:id/sync', async (body, params) => {
+    const id = params.get('id')!;
+    const options: any = {};
+    if (body.since) options.since = new Date(body.since);
+    if (body.limit) options.limit = body.limit;
+    if (body.resource) options.resource = body.resource;
+
+    return registry.sync(id, Object.keys(options).length > 0 ? options : undefined);
+  });
+
+  routes.set('GET /api/connectors', async () => {
+    return {
+      types: registry.listTypes(),
+      configured: registry.listConfigured(),
+    };
+  });
+
+  routes.set('POST /api/webhooks/:type', async (body, _params, rawBody, headers) => {
+    const type = _params.get('type')!;
+    return registry.handleWebhook(type, body, headers);
+  });
+
+  // ─── Server ───────────────────────────────────────────────
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     // CORS
@@ -114,8 +164,11 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
       return;
     }
 
-    // Auth check
-    if (restConfig.authToken) {
+    // Webhook endpoints skip auth (they use their own signature verification)
+    const isWebhook = req.url?.startsWith('/api/webhooks/');
+
+    // Auth check for non-webhook routes
+    if (!isWebhook && restConfig.authToken) {
       const auth = req.headers.authorization;
       if (!auth || auth !== `Bearer ${restConfig.authToken}`) {
         sendJson(res, 401, { error: 'Unauthorized' });
@@ -125,7 +178,13 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
 
     try {
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
-      const body = req.method === 'POST' ? await readBody(req) : {};
+      const { rawBody, parsed } = req.method === 'POST' ? await readBody(req) : { rawBody: '', parsed: {} };
+
+      // Collect headers for webhook signature verification
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (typeof v === 'string') headers[k] = v;
+      }
 
       // Match route
       const { handler, params } = matchRoute(routes, req.method!, url.pathname, url.searchParams);
@@ -135,7 +194,7 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
         return;
       }
 
-      const result = await handler(body, params);
+      const result = await handler(parsed, params, rawBody, headers);
       sendJson(res, 200, result);
     } catch (err: any) {
       const status = err instanceof HttpError ? err.status : 500;
@@ -147,7 +206,11 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
 
   server.listen(restConfig.port, restConfig.host, () => {
     console.log(`Company Brain REST API listening on http://${restConfig.host}:${restConfig.port}`);
-    console.log(`Endpoints: POST /api/ingest, POST /api/search, GET /api/entities/:id, GET /api/health`);
+    console.log(`Endpoints:`);
+    console.log(`  Brain:      POST /api/ingest, POST /api/search, GET /api/entities/:id`);
+    console.log(`  Connectors: POST /api/connectors, POST /api/connectors/:id/sync`);
+    console.log(`  Webhooks:   POST /api/webhooks/:type`);
+    console.log(`  Health:     GET /api/health`);
   });
 }
 
@@ -164,15 +227,15 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
   res.end(JSON.stringify(data));
 }
 
-function readBody(req: IncomingMessage): Promise<any> {
+function readBody(req: IncomingMessage): Promise<{ rawBody: string; parsed: any }> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
-      const raw = Buffer.concat(chunks).toString();
-      if (!raw) return resolve({});
+      const rawBody = Buffer.concat(chunks).toString();
+      if (!rawBody) return resolve({ rawBody: '', parsed: {} });
       try {
-        resolve(JSON.parse(raw));
+        resolve({ rawBody, parsed: JSON.parse(rawBody) });
       } catch {
         reject(new HttpError(400, 'Invalid JSON'));
       }

@@ -144,7 +144,7 @@ curl -X POST http://localhost:3333/api/search \
   -d '{"query": "Acme deal"}'
 ```
 
-Full endpoint list: `POST /api/ingest`, `POST /api/search`, `GET /api/entities/:id`, `GET /api/entities/find/:name`, `GET /api/facts/:sourceId`, `POST /api/schema`, `GET /api/stats`, `GET /api/stats/patterns`, `GET /api/health`.
+Full endpoint list: `POST /api/ingest`, `POST /api/search`, `GET /api/entities/:id`, `GET /api/entities/find/:name`, `GET /api/facts/:sourceId`, `POST /api/schema`, `GET /api/stats`, `GET /api/stats/patterns`, `POST /api/connectors`, `POST /api/connectors/:id/sync`, `GET /api/connectors`, `POST /api/webhooks/:type`, `GET /api/health`.
 
 ---
 
@@ -466,48 +466,193 @@ resolver.register({
 
 ---
 
-## Connectors
+## Connecting Data Sources
 
-Connectors pull data from external sources, normalize it into episodes, and feed it through the extraction pipeline. Each connector implements:
+There are three ways to get data into the brain. Use whichever fits your situation.
+
+### Option 1: Direct Ingestion (any source, no connector needed)
+
+If you just have text, POST it. No connector setup required. This works for any source you can get text out of.
+
+```bash
+# REST API
+curl -X POST http://localhost:3333/api/ingest \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "Meeting with Alice Chen from Acme. They want to upgrade to enterprise.",
+    "sourceType": "meeting_transcript",
+    "sourceId": "granola://meeting/abc123"
+  }'
+```
 
 ```typescript
-interface Connector {
-  id: string;
-  name: string;
-  init(config: Record<string, unknown>): Promise<void>;
-  sync(options?: SyncOptions): Promise<EpisodeInput[]>;
-  handleWebhook?(payload: unknown): Promise<EpisodeInput[]>;
+// SDK
+await brain.ingest({
+  content: "Meeting with Alice Chen from Acme. They want to upgrade to enterprise.",
+  sourceType: "meeting_transcript",
+  sourceId: "granola://meeting/abc123",
+});
+```
+
+This is the simplest path. If you can get the text, you can ingest it. The extraction pipeline handles the rest.
+
+### Option 2: Built-in Connectors (Slack, Notion, Filesystem)
+
+Connectors handle authentication, pagination, incremental sync, and data normalization for you. Connect a source with one API call, then sync it whenever you want. The brain remembers where it left off between syncs (cursor and timestamp are persisted in Postgres).
+
+**Connect via REST API:**
+
+```bash
+# Connect Slack
+curl -X POST http://localhost:3333/api/connectors \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "team-slack",
+    "type": "slack",
+    "config": { "token": "xoxb-your-bot-token" }
+  }'
+
+# Connect Notion
+curl -X POST http://localhost:3333/api/connectors \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "team-notion",
+    "type": "notion",
+    "config": { "token": "ntn_your-integration-token" }
+  }'
+
+# Connect a local docs folder
+curl -X POST http://localhost:3333/api/connectors \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "docs",
+    "type": "filesystem",
+    "config": { "rootDir": "/path/to/docs" }
+  }'
+
+# Sync a connector (fetches new data since last sync)
+curl -X POST http://localhost:3333/api/connectors/team-slack/sync \
+  -H "Authorization: Bearer $TOKEN"
+
+# Sync a specific Slack channel
+curl -X POST http://localhost:3333/api/connectors/team-slack/sync \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "resource": "C0123CHANNEL" }'
+
+# List all connectors
+curl http://localhost:3333/api/connectors \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Connect via SDK:**
+
+```typescript
+import { Brain, ConnectorRegistry, SlackConnector, NotionConnector, FilesystemConnector } from '@company-brain/core';
+
+const brain = new Brain(config);
+await brain.init();
+
+const registry = new ConnectorRegistry(brain);
+registry.register(new SlackConnector());
+registry.register(new NotionConnector());
+registry.register(new FilesystemConnector());
+
+// Connect sources
+await registry.connect({ id: 'team-slack', type: 'slack', config: { token: 'xoxb-...' } });
+await registry.connect({ id: 'team-notion', type: 'notion', config: { token: 'ntn_...' } });
+await registry.connect({ id: 'docs', type: 'filesystem', config: { rootDir: './docs' } });
+
+// First sync fetches everything
+await registry.syncAll();
+
+// Subsequent syncs only fetch new data (timestamps persisted in Postgres)
+await registry.syncAll();
+```
+
+### Option 3: Webhooks (real-time push)
+
+For sources that support push notifications (Slack Events API, etc.), point the webhook URL at your brain server. Incoming events are verified, converted to episodes, and ingested automatically.
+
+```
+Slack Events API webhook URL:
+  https://your-brain-server.com/api/webhooks/slack
+
+Webhook endpoints skip bearer token auth. They use their own
+signature verification (e.g. Slack HMAC-SHA256 signing secret).
+```
+
+To enable Slack webhook verification, pass your signing secret when connecting:
+
+```bash
+curl -X POST http://localhost:3333/api/connectors \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "team-slack",
+    "type": "slack",
+    "config": {
+      "token": "xoxb-your-bot-token",
+      "signingSecret": "your-slack-signing-secret"
+    }
+  }'
+```
+
+When Slack sends an event to `POST /api/webhooks/slack`, the brain verifies the signature, extracts the message content, and runs it through the full ingestion pipeline. No polling needed.
+
+### Writing Your Own Connector
+
+If the built-in connectors do not cover your source, write one. A connector is a single class that extends `AbstractConnector` and implements two methods: `setup()` (verify credentials) and `sync()` (fetch data, return episodes).
+
+```typescript
+import { z } from 'zod';
+import { AbstractConnector } from '@company-brain/core';
+import type { SyncOptions, EpisodeInput } from '@company-brain/core';
+
+const FigmaConfigSchema = z.object({
+  token: z.string().min(1),
+  fileKey: z.string().optional(),
+});
+
+export class FigmaConnector extends AbstractConnector<z.infer<typeof FigmaConfigSchema>> {
+  readonly id = 'figma';
+  readonly name = 'Figma';
+  readonly configSchema = FigmaConfigSchema;
+
+  async setup(config: z.infer<typeof FigmaConfigSchema>) {
+    await this.fetchJson('https://api.figma.com/v1/me', {
+      headers: { 'X-Figma-Token': config.token },
+    });
+  }
+
+  async sync(options?: SyncOptions): Promise<EpisodeInput[]> {
+    const comments = await this.fetchJson<any>(
+      `https://api.figma.com/v1/files/${this.config.fileKey}/comments`,
+      { headers: { 'X-Figma-Token': this.config.token } },
+    );
+    return (comments.comments || []).map((c: any) => ({
+      content: c.message,
+      sourceType: 'figma_comment',
+      sourceId: `figma://${this.config.fileKey}/comment/${c.id}`,
+      validAt: new Date(c.created_at),
+    }));
+  }
 }
 ```
 
-### Built-in Connectors
-
-**Filesystem.** Watches a directory of markdown/text files. Incremental sync via file modification time. Useful for wikis, knowledge bases, and local documentation.
+Register it the same way:
 
 ```typescript
-import { Brain, ConnectorRegistry, FilesystemConnector } from '@company-brain/core';
-
-const brain = new Brain(config);
-const registry = new ConnectorRegistry(brain);
-registry.register(new FilesystemConnector());
-
-await registry.connect({
-  id: 'docs', type: 'filesystem',
-  config: { rootDir: './docs' },
-});
-
-await registry.sync('docs'); // ingests all .md files
+registry.register(new FigmaConnector());
+await registry.connect({ id: 'design', type: 'figma', config: { token: '...', fileKey: '...' } });
+await registry.sync('design');
 ```
 
-**Slack.** Fetches messages from channels via `conversations.history` API. Supports both polling (sync) and push (Events API webhooks). Requires `channels:history` and `channels:read` scopes.
-
-**Notion.** Fetches pages from databases via Notion API. Converts block structure to markdown for extraction. Supports incremental sync via `last_edited_time`.
-
-### Adding Your Own Connectors
-
-The connector interface is designed to be extended. A Figma connector would fetch design file metadata and comments. A HubSpot connector would pull deal records and contact notes. A Linear connector would sync issue descriptions and comments. A Google Docs connector would pull document content. Each one normalizes its data into `EpisodeInput[]` and the rest of the pipeline (extraction, resolution, search indexing) happens automatically.
-
-The `ConnectorRegistry` orchestrates sync operations, handles errors per-episode (one failure does not block others), and supports `syncAll()` for batch operations.
+`AbstractConnector` gives you rate-limited fetch with retry (exponential backoff, 429 handling), Zod config validation, and structured logging for free. See [`docs/writing-connectors.md`](docs/writing-connectors.md) for the full guide with Linear, Google Docs, and HubSpot examples.
 
 ---
 
