@@ -44,6 +44,10 @@ import { embed } from './embedding.js';
 export * from './types.js';
 export { search } from './search/index.js';
 export { extractAndResolve, getStats, suggestPatterns } from './extraction/index.js';
+export { SkillResolver, DEFAULT_SKILLS } from './skills/index.js';
+export type { Skill, SkillMatch, ResolverConfig } from './skills/index.js';
+export { ConnectorRegistry, FilesystemConnector, SlackConnector, NotionConnector } from './connectors/index.js';
+export type { Connector, SyncOptions, SyncResult, ConnectorConfig } from './connectors/index.js';
 
 export class Brain {
   private db: postgres.Sql;
