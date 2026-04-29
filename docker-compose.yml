@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: brain
+      POSTGRES_DB: company_brain
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./packages/core/src/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brain -d company_brain"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build: .
+    ports:
+      - "3333:3333"
+    environment:
+      DATABASE_URL: postgresql://brain:brain@postgres:5432/company_brain
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      BRAIN_AUTH_TOKEN: ${BRAIN_AUTH_TOKEN:-}
+      BRAIN_REST_HOST: "0.0.0.0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["node", "packages/server/dist/index.js", "--rest"]
+    profiles:
+      - full
+
+volumes:
+  pgdata:

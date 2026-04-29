@@ -1,0 +1,31 @@
+{
+  "name": "@company-brain/core",
+  "version": "0.1.0",
+  "description": "Temporal knowledge graph engine with hybrid extraction and search",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./schema": "./dist/schema.js",
+    "./extraction": "./dist/extraction/index.js",
+    "./search": "./dist/search/index.js",
+    "./graph": "./dist/graph/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "postgres": "^3.4.0",
+    "openai": "^4.50.0",
+    "@anthropic-ai/sdk": "^0.30.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0",
+    "@types/node": "^22.0.0"
+  }
+}

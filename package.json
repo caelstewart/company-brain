@@ -1,0 +1,19 @@
+{
+  "name": "company-brain",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open-source temporal knowledge graph engine for AI agents and knowledge workers",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo build",
+    "test": "turbo test",
+    "dev": "turbo dev",
+    "typecheck": "turbo typecheck"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0",
+    "typescript": "^5.5.0"
+  }
+}

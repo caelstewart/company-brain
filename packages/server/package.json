@@ -1,0 +1,28 @@
+{
+  "name": "@company-brain/server",
+  "version": "0.1.0",
+  "description": "MCP + REST server for Company Brain",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "company-brain": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "start:rest": "node dist/index.js --rest",
+    "start:mcp": "node dist/index.js --mcp",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@company-brain/core": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
+  }
+}
