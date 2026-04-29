@@ -2,6 +2,7 @@
   "name": "company-brain",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "npm@10.9.2",
   "description": "Open-source temporal knowledge graph engine for AI agents and knowledge workers",
   "workspaces": [
     "packages/*"

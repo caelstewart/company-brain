@@ -17,7 +17,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@company-brain/core": "workspace:*",
+    "@company-brain/core": "*",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "zod": "^3.23.0"
   },
