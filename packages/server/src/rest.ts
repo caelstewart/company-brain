@@ -14,6 +14,8 @@ import {
   SlackConnector,
   NotionConnector,
   NangoConnector,
+  SkillResolver,
+  loadConnectorsFromDir,
 } from '@company-brain/core';
 import type { BrainConfig } from '@company-brain/core';
 
@@ -25,7 +27,7 @@ interface RestConfig {
 
 type RouteHandler = (body: any, params: URLSearchParams, rawBody?: string, headers?: Record<string, string>) => Promise<unknown>;
 
-export async function startRestServer(brainConfig: BrainConfig, restConfig: RestConfig): Promise<void> {
+export async function startRestServer(brainConfig: BrainConfig, restConfig: RestConfig, options?: { skillsDir?: string; connectorsDir?: string }): Promise<void> {
   const brain = new Brain(brainConfig);
   await brain.init();
 
@@ -35,6 +37,24 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
   registry.register(new SlackConnector());
   registry.register(new NotionConnector());
   registry.register(new NangoConnector());
+
+  // Load user-defined connectors from directory
+  const connectorsDir = options?.connectorsDir || process.env.BRAIN_CONNECTORS_DIR;
+  if (connectorsDir) {
+    const userConnectors = await loadConnectorsFromDir(connectorsDir);
+    for (const c of userConnectors) {
+      registry.register(c);
+      console.log(`[connectors] Loaded custom connector: ${c.id} (${c.name})`);
+    }
+  }
+
+  // Set up skill resolver with user skills
+  const skillsDir = options?.skillsDir || process.env.BRAIN_SKILLS_DIR;
+  const resolver = new SkillResolver({ skillsDir });
+  if (skillsDir) {
+    const loaded = await resolver.loadFromDir();
+    if (loaded > 0) console.log(`[skills] Loaded ${loaded} user skill(s) from ${skillsDir}`);
+  }
 
   const routes = new Map<string, RouteHandler>();
 
@@ -145,6 +165,50 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
       types: registry.listTypes(),
       configured: registry.listConfigured(),
     };
+  });
+
+  // ─── Skill Routes ────────────────────────────────────────
+
+  routes.set('GET /api/skills', async () => {
+    return {
+      skills: resolver.list().map(s => ({
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        triggers: s.triggers,
+        alwaysOn: s.alwaysOn || false,
+        priority: s.priority || 0,
+      })),
+    };
+  });
+
+  routes.set('GET /api/skills/:id', async (_body, params) => {
+    const id = params.get('id')!;
+    const skill = resolver.get(id);
+    if (!skill) throw new HttpError(404, 'Skill not found');
+    return skill;
+  });
+
+  routes.set('POST /api/skills', async (body) => {
+    if (!body.id || !body.name || !body.content) {
+      throw new HttpError(400, 'Required fields: id, name, content');
+    }
+    const skill = {
+      id: body.id,
+      name: body.name,
+      description: body.description || '',
+      triggers: body.triggers || [],
+      content: body.content,
+      alwaysOn: body.alwaysOn,
+      priority: body.priority ?? 50,
+    };
+
+    try {
+      const filepath = await resolver.save(skill);
+      return { ok: true, id: skill.id, filepath };
+    } catch (err: any) {
+      throw new HttpError(500, err.message);
+    }
   });
 
   routes.set('POST /api/webhooks/:type', async (body, _params, rawBody, headers) => {

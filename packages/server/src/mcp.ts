@@ -10,12 +10,20 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { Brain } from '@company-brain/core';
+import { Brain, SkillResolver, ConnectorRegistry, FilesystemConnector, SlackConnector, NotionConnector, NangoConnector, loadConnectorsFromDir } from '@company-brain/core';
 import type { BrainConfig } from '@company-brain/core';
 
-export async function startMcpServer(config: BrainConfig): Promise<void> {
+export async function startMcpServer(config: BrainConfig, options?: { skillsDir?: string; connectorsDir?: string }): Promise<void> {
   const brain = new Brain(config);
   await brain.init();
+
+  // Load skills from directory (defaults + user overrides)
+  const skillsDir = options?.skillsDir || process.env.BRAIN_SKILLS_DIR;
+  const resolver = new SkillResolver({ skillsDir });
+  if (skillsDir) {
+    const loaded = await resolver.loadFromDir();
+    if (loaded > 0) console.error(`[skills] Loaded ${loaded} user skill(s) from ${skillsDir}`);
+  }
 
   const server = new McpServer({
     name: 'company-brain',
@@ -180,6 +188,96 @@ export async function startMcpServer(config: BrainConfig): Promise<void> {
           text: JSON.stringify(stats, null, 2),
         }],
       };
+    },
+  );
+
+  // ─── Skill Tools ────────────────────────────────────────────
+
+  server.tool(
+    'list_skills',
+    'List all available skills (built-in and user-created). Shows the routing table for agent skill selection.',
+    {},
+    async () => {
+      const skills = resolver.list().map(s => ({
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        triggers: s.triggers,
+        alwaysOn: s.alwaysOn || false,
+        priority: s.priority || 0,
+      }));
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ skills, routingTable: resolver.toRoutingTable() }, null, 2),
+        }],
+      };
+    },
+  );
+
+  server.tool(
+    'get_skill',
+    'Get the full content of a skill by ID. Returns the complete SOP markdown.',
+    {
+      id: z.string().describe('Skill ID to retrieve'),
+    },
+    async ({ id }) => {
+      const skill = resolver.get(id);
+      if (!skill) {
+        return {
+          content: [{ type: 'text' as const, text: `Skill "${id}" not found.` }],
+        };
+      }
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify(skill, null, 2),
+        }],
+      };
+    },
+  );
+
+  server.tool(
+    'save_skill',
+    'Create or update a skill. Saves as a markdown file in the skills directory so it persists across restarts.',
+    {
+      id: z.string().describe('Unique skill ID (lowercase, hyphens ok)'),
+      name: z.string().describe('Human-readable skill name'),
+      description: z.string().describe('Short description of what this skill does'),
+      triggers: z.array(z.string()).describe('Phrases that activate this skill'),
+      content: z.string().describe('Full markdown SOP content'),
+      alwaysOn: z.boolean().optional().describe('Run on every message (default: false)'),
+      priority: z.number().optional().describe('Priority for resolver conflicts (higher = preferred, default: 50)'),
+    },
+    async ({ id, name, description, triggers, content, alwaysOn, priority }) => {
+      const skill = {
+        id,
+        name,
+        description,
+        triggers,
+        content,
+        alwaysOn: alwaysOn ?? undefined,
+        priority: priority ?? 50,
+      };
+
+      try {
+        const filepath = await resolver.save(skill);
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ ok: true, id, filepath, message: `Skill "${name}" saved. It will be loaded automatically on next restart.` }, null, 2),
+          }],
+        };
+      } catch (err: any) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ error: err.message }, null, 2),
+          }],
+        };
+      }
     },
   );
 

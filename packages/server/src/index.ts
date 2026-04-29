@@ -18,13 +18,21 @@
  *   BRAIN_GROUP_ID        - Default group/workspace ID
  *   BRAIN_REST_PORT       - REST API port (default: 3333)
  *   BRAIN_REST_HOST       - REST API host (default: 127.0.0.1)
+ *   BRAIN_SKILLS_DIR      - Directory for user skill files (default: ~/.company-brain/skills)
+ *   BRAIN_CONNECTORS_DIR  - Directory for custom connector definitions (default: ~/.company-brain/connectors)
  */
 
 import type { BrainConfig } from '@company-brain/core';
 import { startMcpServer } from './mcp.js';
 import { startRestServer } from './rest.js';
 
-function parseArgs(argv: string[]): { mode: 'mcp' | 'rest' | 'both'; port: number; host: string } {
+const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '~';
+
+function defaultSkillsDir(): string {
+  return `${HOME_DIR}/.company-brain/skills`;
+}
+
+function parseArgs(argv: string[]): { mode: 'mcp' | 'rest' | 'both'; port: number; host: string; skillsDir: string; connectorsDir: string } {
   const hasMcp = argv.includes('--mcp');
   const hasRest = argv.includes('--rest');
 
@@ -40,7 +48,13 @@ function parseArgs(argv: string[]): { mode: 'mcp' | 'rest' | 'both'; port: numbe
   const hostIdx = argv.indexOf('--host');
   const host = hostIdx >= 0 ? argv[hostIdx + 1] : process.env.BRAIN_REST_HOST || '127.0.0.1';
 
-  return { mode, port, host };
+  const skillsDirIdx = argv.indexOf('--skills-dir');
+  const skillsDir = skillsDirIdx >= 0 ? argv[skillsDirIdx + 1] : process.env.BRAIN_SKILLS_DIR || defaultSkillsDir();
+
+  const connectorsDirIdx = argv.indexOf('--connectors-dir');
+  const connectorsDir = connectorsDirIdx >= 0 ? argv[connectorsDirIdx + 1] : process.env.BRAIN_CONNECTORS_DIR || `${HOME_DIR}/.company-brain/connectors`;
+
+  return { mode, port, host, skillsDir, connectorsDir };
 }
 
 function buildConfig(): BrainConfig {
@@ -66,11 +80,11 @@ function buildConfig(): BrainConfig {
 }
 
 async function main() {
-  const { mode, port, host } = parseArgs(process.argv.slice(2));
+  const { mode, port, host, skillsDir, connectorsDir } = parseArgs(process.argv.slice(2));
   const config = buildConfig();
 
   if (mode === 'mcp' || mode === 'both') {
-    await startMcpServer(config);
+    await startMcpServer(config, { skillsDir, connectorsDir });
   }
 
   if (mode === 'rest' || mode === 'both') {
@@ -78,7 +92,7 @@ async function main() {
       port,
       host,
       authToken: process.env.BRAIN_AUTH_TOKEN,
-    });
+    }, { skillsDir, connectorsDir });
   }
 }
 

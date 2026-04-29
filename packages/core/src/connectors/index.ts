@@ -9,4 +9,7 @@ export { NotionConnector, NotionConfigSchema } from './notion.js';
 export type { NotionConfig } from './notion.js';
 export { NangoConnector, NangoConfigSchema } from './nango.js';
 export type { NangoConfig } from './nango.js';
+export { ConfigurableConnector, ConnectorDefinitionSchema } from './configurable.js';
+export type { ConnectorDefinition } from './configurable.js';
+export { loadConnectorsFromDir, validateDefinition } from './config-loader.js';
 export type { Connector, SyncOptions, SyncResult, ConnectorConfig } from './types.js';

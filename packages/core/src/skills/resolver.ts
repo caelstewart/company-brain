@@ -12,14 +12,46 @@
 
 import type { Skill, SkillMatch, ResolverConfig } from './types.js';
 import { DEFAULT_SKILLS } from './defaults.js';
+import { loadSkillsFromDir, saveSkillToDir } from './loader.js';
 
 export class SkillResolver {
   private skills: Skill[] = [];
   private minConfidence: number;
+  private skillsDir?: string;
 
   constructor(config?: ResolverConfig) {
     this.minConfidence = config?.minConfidence ?? 0.3;
+    this.skillsDir = config?.skillsDir;
     this.skills = [...DEFAULT_SKILLS, ...(config?.skills || [])];
+  }
+
+  /**
+   * Load user skills from the skills directory.
+   * User skills override defaults with the same id.
+   * Call this after construction if skillsDir is set.
+   */
+  async loadFromDir(dir?: string): Promise<number> {
+    const skillsDir = dir || this.skillsDir;
+    if (!skillsDir) return 0;
+    this.skillsDir = skillsDir;
+
+    const userSkills = await loadSkillsFromDir(skillsDir);
+    for (const skill of userSkills) {
+      this.register(skill);
+    }
+    return userSkills.length;
+  }
+
+  /**
+   * Save a skill to the skills directory and register it.
+   * Creates or overwrites the file. Returns the file path.
+   */
+  async save(skill: Skill): Promise<string> {
+    if (!this.skillsDir) {
+      throw new Error('No skills directory configured. Set skillsDir in ResolverConfig or BRAIN_SKILLS_DIR env var.');
+    }
+    this.register(skill);
+    return saveSkillToDir(this.skillsDir, skill);
   }
 
   /**

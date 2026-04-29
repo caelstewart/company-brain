@@ -16,7 +16,7 @@ Building an enterprise brain means solving four problems at once.
 
 Your data lives in Slack, Notion, HubSpot, Figma, Linear, Granola, Google Docs, email, and whatever else your team adopted last quarter. None of these systems talk to each other.
 
-**Status: solved.** The connector framework normalizes any source into timestamped episodes. Built-in connectors handle Slack, Notion, and the filesystem. New connectors (Figma, HubSpot, Linear, etc.) are one class implementing `sync()`. Incremental sync is native.
+**Status: solved.** The connector framework normalizes any source into timestamped episodes. Built-in connectors handle Slack, Notion, and the filesystem. The Nango connector gives access to 700+ APIs without writing code. For anything else, drop a JSON config file in `~/.company-brain/connectors/` to define a new REST API connector with no code. Incremental sync is native.
 
 ### 2. Unstructured
 
@@ -144,7 +144,7 @@ curl -X POST http://localhost:3333/api/search \
   -d '{"query": "Acme deal"}'
 ```
 
-Full endpoint list: `POST /api/ingest`, `POST /api/search`, `GET /api/entities/:id`, `GET /api/entities/find/:name`, `GET /api/facts/:sourceId`, `POST /api/schema`, `GET /api/stats`, `GET /api/stats/patterns`, `POST /api/connectors`, `POST /api/connectors/:id/sync`, `GET /api/connectors`, `POST /api/webhooks/:type`, `GET /api/health`.
+Full endpoint list: `POST /api/ingest`, `POST /api/search`, `GET /api/entities/:id`, `GET /api/entities/find/:name`, `GET /api/facts/:sourceId`, `POST /api/schema`, `GET /api/stats`, `GET /api/stats/patterns`, `POST /api/connectors`, `POST /api/connectors/:id/sync`, `GET /api/connectors`, `POST /api/webhooks/:type`, `GET /api/skills`, `GET /api/skills/:id`, `POST /api/skills`, `GET /api/health`.
 
 ---
 
@@ -448,27 +448,70 @@ The resolver also generates a markdown routing table (`resolver.toRoutingTable()
 
 ### Custom Skills
 
-Register your own skills:
+Skills are markdown files stored in `~/.company-brain/skills/`. The 7 built-in skills work out of the box. You can add new skills or override built-in ones by creating files in this directory. No repo clone needed.
 
-```typescript
-import { SkillResolver } from '@company-brain/core';
+Each skill file has YAML frontmatter with metadata, followed by the markdown SOP:
 
-const resolver = new SkillResolver();
-resolver.register({
-  id: 'deal-tracker',
-  name: 'Track Deal',
-  description: 'Track a sales deal through the pipeline',
-  triggers: ['track deal', 'deal update', 'pipeline status'],
-  content: `# Deal Tracker\n\n## Protocol\n1. Search for the deal entity...\n2. ...`,
-  priority: 75,
-});
+```markdown
+---
+id: deal-tracker
+name: Track Deal
+description: Track a sales deal through the pipeline
+triggers:
+  - track deal
+  - deal update
+  - pipeline status
+priority: 75
+---
+# Deal Tracker
+
+## Protocol
+1. Search for the deal entity: `brain.findEntity(dealName)`
+2. Get full context: `brain.getEntity(id, { includeFacts: true, includeTimeline: true })`
+3. Present current status, recent changes, and next steps
+4. If deal info was updated, ingest the new information back
+
+## What to Track
+- Deal stage changes (lead, qualified, proposal, closed)
+- Key contacts and their roles
+- Competitor mentions
+- Timeline and deadlines
+```
+
+Save that as `~/.company-brain/skills/deal-tracker.md`. It loads automatically on next startup.
+
+You can also create or edit skills directly from Cursor/Claude Code. The MCP server exposes `save_skill`, `list_skills`, and `get_skill` tools. Ask Claude to "create a skill for triaging support tickets" and it will write the file for you.
+
+To override a built-in skill, create a file with the same id. For example, `~/.company-brain/skills/query.md` replaces the default query skill with your team's custom search protocol.
+
+**REST API:**
+
+```bash
+# List all skills
+curl http://localhost:3333/api/skills -H "Authorization: Bearer $TOKEN"
+
+# Get a skill
+curl http://localhost:3333/api/skills/query -H "Authorization: Bearer $TOKEN"
+
+# Create/update a skill
+curl -X POST http://localhost:3333/api/skills \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "deal-tracker",
+    "name": "Track Deal",
+    "description": "Track a sales deal through the pipeline",
+    "triggers": ["track deal", "deal update"],
+    "content": "# Deal Tracker\n\n## Protocol\n1. Search for the deal...",
+    "priority": 75
+  }'
 ```
 
 ---
 
 ## Connecting Data Sources
 
-There are three ways to get data into the brain. Use whichever fits your situation.
+There are multiple ways to get data into the brain, from zero-code to full custom.
 
 ### Option 1: Direct Ingestion (any source, no connector needed)
 
@@ -604,9 +647,86 @@ curl -X POST http://localhost:3333/api/connectors \
 
 When Slack sends an event to `POST /api/webhooks/slack`, the brain verifies the signature, extracts the message content, and runs it through the full ingestion pipeline. No polling needed.
 
-### Writing Your Own Connector
+### Custom Connectors (JSON config, no code)
 
-If the built-in connectors do not cover your source, write one. A connector is a single class that extends `AbstractConnector` and implements two methods: `setup()` (verify credentials) and `sync()` (fetch data, return episodes).
+Most REST APIs follow the same pattern: authenticate, paginate through records, extract content. You can define a connector for any REST API with a single JSON file. No code, no repo clone, no TypeScript.
+
+Drop a `.json` file in `~/.company-brain/connectors/` and it becomes a connector type you can connect and sync like any built-in.
+
+**Example: Figma comments**
+
+```json
+{
+  "id": "figma-comments",
+  "name": "Figma Comments",
+  "url": "https://api.figma.com/v1/files/{{fileKey}}/comments",
+  "auth": { "type": "header", "header": "X-Figma-Token", "value": "{{token}}" },
+  "records": "comments",
+  "content": "{{message}}",
+  "sourceId": "figma://{{_config.fileKey}}/comment/{{id}}",
+  "sourceType": "figma_comment",
+  "dateField": "created_at"
+}
+```
+
+Save that as `~/.company-brain/connectors/figma-comments.json`. Now connect and sync:
+
+```bash
+curl -X POST http://localhost:3333/api/connectors \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "id": "design-feedback",
+    "type": "figma-comments",
+    "config": { "token": "your-figma-token", "fileKey": "abc123" }
+  }'
+
+curl -X POST http://localhost:3333/api/connectors/design-feedback/sync \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Example: GitHub issues**
+
+```json
+{
+  "id": "github-issues",
+  "name": "GitHub Issues",
+  "url": "https://api.github.com/repos/{{owner}}/{{repo}}/issues",
+  "auth": { "type": "bearer", "value": "{{token}}" },
+  "headers": { "Accept": "application/vnd.github.v3+json" },
+  "pagination": { "type": "page", "pageParam": "page", "limitParam": "per_page", "limit": 100 },
+  "content": "{{title}}\n\n{{body}}",
+  "sourceId": "github://{{_config.owner}}/{{_config.repo}}/issues/{{number}}",
+  "sourceType": "github_issue",
+  "dateField": "created_at",
+  "sinceParam": "since",
+  "sinceFormat": "iso"
+}
+```
+
+**Config reference:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `id` | Yes | Connector type ID |
+| `name` | Yes | Human-readable name |
+| `url` | Yes | URL template. `{{vars}}` are filled from instance config. |
+| `auth` | No | Auth config: `type` (`bearer`, `header`, `query`), `value` template, `header`/`param` name |
+| `headers` | No | Extra headers on every request |
+| `records` | No | Dot-path to records array in response (e.g. `data.items`). Omit if response is the array. |
+| `pagination` | No | `type` (`cursor`, `offset`, `page`), field/param names, `limit` |
+| `content` | No | Template for episode content. `{{field}}` from record, `{{_config.var}}` from instance config. |
+| `sourceId` | No | Template for episode sourceId |
+| `sourceType` | Yes | Episode sourceType |
+| `dateField` | No | Record field with timestamp |
+| `sinceParam` | No | Query param for incremental sync |
+| `sinceFormat` | No | `iso` (default) or `unix` |
+| `rateLimitMs` | No | Milliseconds between requests (default: 200) |
+
+This covers most REST APIs. For GraphQL, custom auth flows, or complex transformations, write a TypeScript connector class or a standalone script that POSTs to `/api/ingest`.
+
+### Custom Connectors (TypeScript, full control)
+
+For sources that need more than what the JSON config supports, write a connector class. Extend `AbstractConnector` and implement `setup()` and `sync()`.
 
 ```typescript
 import { z } from 'zod';
@@ -644,15 +764,7 @@ export class FigmaConnector extends AbstractConnector<z.infer<typeof FigmaConfig
 }
 ```
 
-Register it the same way:
-
-```typescript
-registry.register(new FigmaConnector());
-await registry.connect({ id: 'design', type: 'figma', config: { token: '...', fileKey: '...' } });
-await registry.sync('design');
-```
-
-`AbstractConnector` gives you rate-limited fetch with retry (exponential backoff, 429 handling), Zod config validation, and structured logging for free. See [`docs/writing-connectors.md`](docs/writing-connectors.md) for the full guide with Linear, Google Docs, and HubSpot examples.
+`AbstractConnector` gives you rate-limited fetch with retry (exponential backoff, 429 handling), Zod config validation, and structured logging for free. See [`docs/writing-connectors.md`](docs/writing-connectors.md) for the full guide.
 
 ---
 
@@ -772,14 +884,19 @@ company-brain/
 │   │   │   ├── skills/
 │   │   │   │   ├── types.ts            # Skill, SkillMatch, ResolverConfig
 │   │   │   │   ├── resolver.ts         # Intent to skill matching
+│   │   │   │   ├── loader.ts           # Load/save skills from markdown files
 │   │   │   │   ├── defaults.ts         # 7 built-in skills (SOPs)
 │   │   │   │   └── index.ts
 │   │   │   └── connectors/
 │   │   │       ├── types.ts            # Connector, SyncOptions, SyncResult
+│   │   │       ├── base.ts             # AbstractConnector (rate limit, retry, Zod)
+│   │   │       ├── configurable.ts     # JSON-defined REST API connector
+│   │   │       ├── config-loader.ts    # Load connector definitions from directory
 │   │   │       ├── registry.ts         # ConnectorRegistry orchestration
 │   │   │       ├── filesystem.ts       # Markdown/text file connector
 │   │   │       ├── slack.ts            # Slack messages + Events API
 │   │   │       ├── notion.ts           # Notion pages + databases
+│   │   │       ├── nango.ts            # Nango (700+ integrations via REST API)
 │   │   │       └── index.ts
 │   │   ├── tests/
 │   │   │   ├── extraction.test.ts      # 12 unit tests (no DB)
@@ -842,7 +959,7 @@ company-brain/
 ## Testing
 
 ```bash
-# Unit tests (no database needed): 33 tests
+# Unit tests (no database needed): 136 tests
 npm test
 
 # Integration tests (needs Postgres)
@@ -854,10 +971,14 @@ npx tsx tests/demo.ts
 ```
 
 The test suite covers:
-- **Extraction**: entity extraction from emails, @mentions, role patterns, known entities, custom hints. Fact extraction from role patterns, decisions. Confidence assessment heuristics.
-- **Skills**: resolver matching for all 7 skills, custom skill registration, routing table generation, always-on skill detection.
-- **Search**: cosine similarity correctness.
-- **Integration**: full pipeline (ingest, extract, resolve, search), contradiction detection, temporal queries, extraction stats.
+- **Extraction** (16 tests): entity extraction from emails, @mentions, role patterns, known entities, custom hints. Fact extraction from role patterns, decisions. Confidence assessment heuristics.
+- **Skills** (13 tests): resolver matching for all 7 skills, custom skill registration, routing table generation, always-on skill detection.
+- **Skill loader** (17 tests): frontmatter parsing, directory loading, save/load round-trip, resolver integration, user overrides.
+- **Connectors** (14 tests): AbstractConnector validation, FilesystemConnector file discovery, incremental sync, extension filtering.
+- **Nango** (41 tests): config validation, content mapping, pagination, date extraction, metadata extraction, sync end-to-end.
+- **Configurable connectors** (31 tests): definition validation, auth types, template interpolation, pagination modes, since params, directory loading.
+- **Search** (4 tests): cosine similarity correctness.
+- **Integration** (7 tests): full pipeline (ingest, extract, resolve, search), contradiction detection, temporal queries, extraction stats.
 
 ---
 
@@ -872,6 +993,8 @@ The test suite covers:
 | `BRAIN_GROUP_ID` | No | `default` | Default workspace/tenant |
 | `BRAIN_REST_PORT` | No | `3333` | REST API port |
 | `BRAIN_REST_HOST` | No | `127.0.0.1` | REST API bind address |
+| `BRAIN_SKILLS_DIR` | No | `~/.company-brain/skills` | Directory for user skill files |
+| `BRAIN_CONNECTORS_DIR` | No | `~/.company-brain/connectors` | Directory for custom connector JSON definitions |
 
 ## Requirements
 
