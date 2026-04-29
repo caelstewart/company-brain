@@ -8,39 +8,33 @@ Built by studying what works and what doesn't in three systems: [gbrain](https:/
 
 ## The Problem
 
-Someone is going to build a world-class "Brain" for enterprises and make a stupid amount of money. As David Fant put it: "Coding with AI is solved because all context is in the git repo. Knowledge work is difficult because context is spread out. An AI system that creates a git repo with all context for a knowledge worker will be able to 100% automate the work."
+AI solved coding first because all the context already lives in one place: the git repo. Knowledge work is the opposite. Context is scattered across dozens of tools, stored in dozens of formats, and there is no unit test to tell you if your output is correct.
 
-Engineering has been prepared for this moment for a long time because of the deterministic nature of code, the centralization of data in version control, and AI tools largely built by engineers for engineers. But for the rest of white collar work, there is a ton of catching up to do.
+Building an enterprise brain means solving four problems at once.
 
-The core challenge breaks down into four problems. Nobody has truly cracked all of them yet. Here is where Company Brain stands on each.
+### 1. Distributed
 
-### 1. Knowledge is Distributed
+Your data lives in Slack, Notion, HubSpot, Figma, Linear, Granola, Google Docs, email, and whatever else your team adopted last quarter. None of these systems talk to each other.
 
-Transcripts live in Granola. Documents in Notion. Customer data in HubSpot. Design files in Figma. Sprint boards in Linear. Conversations in Slack. The first step is building an ingestion engine that connects to your disparate data sources and auto-updates based on the shelf life of the data.
+**Status: solved.** The connector framework normalizes any source into timestamped episodes. Built-in connectors handle Slack, Notion, and the filesystem. New connectors (Figma, HubSpot, Linear, etc.) are one class implementing `sync()`. Incremental sync is native.
 
-**How we handle it.** Company Brain ships with a connector framework that normalizes any external source into "episodes" (timestamped, immutable records of raw content). Built-in connectors cover Slack, Notion, and the local filesystem. The `Connector` interface is intentionally simple: implement `sync()` to return episodes, and the extraction pipeline handles the rest. Adding a connector for Figma, HubSpot, Linear, Google Docs, email, or any other source is a matter of writing one class that fetches data and returns text. Incremental sync is supported natively (each connector tracks its own cursor/timestamp so it only pulls new data on subsequent runs). This is the easiest of the four problems, and it is largely solved in the current architecture.
+### 2. Unstructured
 
-### 2. Knowledge is Unstructured
+Raw transcripts, documents, and messages need to become structured knowledge: who, what, when, and how things relate. The brain has to self-organize into a schema that works for your specific business.
 
-Creating a proposal that pulls the right details from a sales call, anchors to a proven format from past proposals, and grounds pricing in real sprint data from Linear requires the brain to self-organize in a thoughtful schema. This is hard, especially if you want a generalizable brain that can be shaped to an array of different enterprises.
+**Status: solved.** LLM-first extraction reads raw text and outputs typed entities, relationships, temporal metadata, and confidence scores. The schema is configurable per workspace with custom entity types and relation types. Entity resolution (trigram similarity + alias table) deduplicates the same person or company across sources automatically.
 
-**How we handle it.** The extraction pipeline is LLM-first. Claude (or GPT) reads raw text and outputs structured entities, typed relationships, temporal metadata, and confidence scores. This is not regex pattern matching; it is genuine semantic understanding of who did what, when, and why. The schema is configurable through custom ontology definitions (entity types, relation types, structural constraints), scoped per workspace via `group_id`. An enterprise selling SaaS can define `deal`, `feature_request`, and `competitor` entity types with typed relations between them. A consulting firm can define `engagement`, `deliverable`, and `stakeholder`. The LLM extraction prompt adapts to whatever schema you define. Entity resolution (trigram similarity plus an alias table) prevents duplicates across sources. When the same person shows up in a Slack message, a Notion doc, and a meeting transcript, they resolve to one node in the graph.
+### 3. Unverifiable
 
-### 3. Knowledge is Unverifiable
+Code either passes the test or it doesn't. Knowledge work is subjective. There is no unit test for "is this a good insight?"
 
-Writing a function, running a unit test, and seeing if the code works is easy. It works or it doesn't. Using AI to accelerate knowledge work is subjective. What is a good idea? Is the content in your voice? Does it feel like slop or something novel? These questions are difficult and non-verifiable.
+**Status: partial.** Every fact has a confidence score, traces back to its source text, and carries temporal history so you can see what changed and when. Extraction logging tracks every operation for human review. What is missing: user feedback loops where a human corrects an extraction and the system learns from it. This is an open problem.
 
-**How we handle it (partially).** Company Brain provides the infrastructure for verification but does not claim to solve this fully. Every fact carries a confidence score (0.95 for explicitly stated, 0.8 for implied, 0.6 for inferred). Every fact traces back to its source episode, so you can always check the original text. The temporal model means you can see what changed and when, which helps catch drift. The extraction logging system tracks every extraction with method, duration, and results, and the `suggestPatterns()` function identifies recurring extraction patterns a human can review.
+### 4. Compaction
 
-What we do not yet have: explicit user feedback loops where a knowledge worker marks an extraction as wrong and the system learns from that correction. Content quality scoring (is this output good?) remains an open problem. This is an honest gap, and solving it well is part of what will separate the winner in this space.
+As the corpus grows, so does noise. Without cleanup, you end up searching for needles in a haystack of stale, redundant, or low-value facts.
 
-### 4. Knowledge Needs Compaction
-
-The brain does not just have to organize and form coherent relationships. It also has to self-improve based on feedback. Memory systems are great to a point, but as you scale the corpus of data, compaction and cleaning become wildly important to avoid the needle-in-haystack problem.
-
-**How we handle it (partially).** Temporal invalidation is the primary compaction mechanism today. When Alice changes roles from VP to CRO, the old "VP" fact is invalidated (not deleted), and the new "CRO" fact takes its place. Queries return only current facts by default, so stale information does not pollute results. Entity resolution prevents duplicate nodes from accumulating. The recency boost in search scoring gives a small advantage to recent information over old information, which naturally surfaces what matters now.
-
-What we do not yet have: automatic summary condensation (collapsing 50 facts about an entity into a tighter summary), relevance decay (automatically deprioritizing facts that haven't been referenced in months), or corpus-wide cleanup jobs. These are important for any brain operating at enterprise scale with millions of facts, and they are on the roadmap.
+**Status: partial.** Temporal invalidation replaces stale facts (VP becomes CRO, old fact gets marked superseded). Queries return only current facts by default. Entity resolution prevents duplicate nodes. Recency boost in search favors recent information. What is missing: automatic summary condensation, relevance decay for unreferenced facts, and corpus-wide cleanup jobs.
 
 ## Quick Start
 
