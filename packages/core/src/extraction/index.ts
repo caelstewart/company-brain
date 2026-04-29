@@ -1,12 +1,17 @@
 /**
- * Extraction Pipeline: The 3-layer hybrid approach.
+ * Extraction Pipeline — LLM-first with deterministic augmentation.
  *
- * Layer 1: Deterministic (regex, patterns, known entity matching) — instant, $0
- * Layer 2: LLM fallback (when deterministic confidence < threshold) — ~1s, ~$0.001
- * Layer 3: Resolution (dedup, contradiction detection, summary rewrite)
+ * Architecture (reliability-optimized):
+ *   1. Deterministic pre-scan: catch structured data (emails, URLs, @mentions)
+ *   2. LLM extraction: the primary engine — handles nuance, paraphrase, context
+ *   3. Merge: combine deterministic + LLM, preferring LLM for entity/relationship quality
+ *   4. Resolution: dedup against existing graph, detect contradictions, update summaries
+ *   5. Logging: track extraction methods for observability
  *
- * The fail-improve loop logs every LLM fallback so the system progressively
- * moves more work into the deterministic layer over time.
+ * The deterministic layer is NOT a replacement for the LLM — it's a
+ * supplement that catches structured signals the LLM might overlook
+ * (email addresses, @handles, URLs) and provides known-entity matching
+ * for faster resolution.
  */
 
 import type postgres from 'postgres';
@@ -21,7 +26,6 @@ import type {
 import {
   extractEntitiesDeterministic,
   extractFactsDeterministic,
-  assessExtractionConfidence,
   type DeterministicContext,
 } from './deterministic.js';
 import { extractWithLLM } from './llm.js';
@@ -44,7 +48,7 @@ export interface ExtractAndResolveOptions {
   embeddingConfig?: EmbeddingConfig;
   /** Pre-loaded context for deterministic matching */
   deterministicContext?: DeterministicContext;
-  /** Skip LLM even if deterministic confidence is low */
+  /** Skip LLM — use only deterministic extraction (for testing without API keys) */
   deterministicOnly?: boolean;
 }
 
@@ -59,10 +63,15 @@ export interface ExtractAndResolveResult {
 /**
  * Run the full extraction pipeline on a piece of text.
  *
- * 1. Try deterministic extraction
- * 2. If confidence < threshold, fall back to LLM
- * 3. Resolve against existing graph (dedup, contradiction, summary update)
- * 4. Log the extraction for fail-improve
+ * Default flow (LLM-first):
+ *   1. Pre-scan with deterministic patterns (emails, @mentions, known entities)
+ *   2. Run LLM extraction for entities + relationships
+ *   3. Merge results (deterministic structured data + LLM semantic understanding)
+ *   4. Resolve against existing graph (dedup, contradiction, summary update)
+ *   5. Log for observability
+ *
+ * Fallback flow (deterministicOnly=true):
+ *   Runs only deterministic extraction — useful for testing or when no API keys.
  */
 export async function extractAndResolve(
   db: postgres.Sql,
@@ -70,32 +79,32 @@ export async function extractAndResolve(
   options: ExtractAndResolveOptions,
 ): Promise<ExtractAndResolveResult> {
   const startTime = Date.now();
-  const threshold = options.config?.llmFallbackThreshold ?? 0.6;
 
-  // ─── Layer 1: Deterministic ─────────────────────────────────
+  // ─── Step 1: Deterministic pre-scan ──────────────────────
+  // Catches structured data: emails, @mentions, URLs, known entity matches
   const deterEntities = extractEntitiesDeterministic(text, options.deterministicContext);
   const deterFacts = extractFactsDeterministic(text, deterEntities);
-  const confidence = assessExtractionConfidence(text, deterEntities, deterFacts);
 
-  let finalEntities: ExtractedEntity[] = deterEntities;
-  let finalFacts: ExtractedFact[] = deterFacts;
-  let method: 'deterministic' | 'llm' | 'hybrid' = 'deterministic';
+  let finalEntities: ExtractedEntity[];
+  let finalFacts: ExtractedFact[];
+  let method: 'deterministic' | 'llm' | 'hybrid';
 
-  // ─── Layer 2: LLM Fallback ─────────────────────────────────
-  if (confidence < threshold && !options.deterministicOnly) {
-    const llmResult = await extractWithLLM(text, options.llmConfig);
+  if (options.deterministicOnly || !hasLLMConfig(options.llmConfig)) {
+    // ─── Deterministic-only mode ─────────────────────────────
+    finalEntities = deterEntities;
+    finalFacts = deterFacts;
+    method = 'deterministic';
+  } else {
+    // ─── Step 2: LLM extraction (primary engine) ─────────────
+    // Build existing graph context for the LLM to reference
+    const existingContext = await buildGraphContext(db, options.groupId, deterEntities);
+    const llmResult = await extractWithLLM(text, options.llmConfig, existingContext);
 
-    // Merge: LLM results supplement deterministic, not replace
-    const deterNames = new Set(deterEntities.map(e => e.name.toLowerCase()));
-    const newFromLLM = llmResult.entities.filter(e => !deterNames.has(e.name.toLowerCase()));
-    finalEntities = [...deterEntities, ...newFromLLM];
-
-    const deterFactKeys = new Set(deterFacts.map(f => `${f.sourceName}|${f.relation}|${f.targetName}`.toLowerCase()));
-    const newFactsFromLLM = llmResult.facts.filter(f =>
-      !deterFactKeys.has(`${f.sourceName}|${f.relation}|${f.targetName}`.toLowerCase())
-    );
-    finalFacts = [...deterFacts, ...newFactsFromLLM];
-
+    // ─── Step 3: Merge deterministic + LLM results ───────────
+    // LLM is the authority for entity names and relationships.
+    // Deterministic adds structured data (emails, handles) the LLM might miss.
+    finalEntities = mergeEntities(llmResult.entities, deterEntities);
+    finalFacts = mergeFacts(llmResult.facts, deterFacts);
     method = deterEntities.length > 0 ? 'hybrid' : 'llm';
   }
 
@@ -108,10 +117,9 @@ export async function extractAndResolve(
     durationMs,
   };
 
-  // ─── Layer 3: Resolution ────────────────────────────────────
+  // ─── Step 4: Resolution ────────────────────────────────────
   const resolved = await resolveEntities(db, finalEntities, options.groupId);
 
-  // Create new entities
   let entitiesCreated = 0;
   let entitiesUpdated = 0;
   const entityIdMap = new Map<string, string>();
@@ -121,7 +129,6 @@ export async function extractAndResolve(
       entityIdMap.set(res.entity.name.toLowerCase(), res.existingId);
       entitiesUpdated++;
     } else {
-      // Create new entity
       const nameEmbedding = await embed(res.entity.name, options.embeddingConfig).catch(() => null);
       const result = await db`
         INSERT INTO entities (group_id, entity_type, name, attributes, name_embedding)
@@ -137,7 +144,6 @@ export async function extractAndResolve(
       const newId = result[0].id;
       entityIdMap.set(res.entity.name.toLowerCase(), newId);
 
-      // Register alias for future dedup
       await db`
         INSERT INTO entity_aliases (entity_id, alias, alias_type)
         VALUES (${newId}, ${res.entity.name}, 'name')
@@ -164,7 +170,6 @@ export async function extractAndResolve(
         WHERE id = ${res.existingFactId}
       `;
       factsInvalidated++;
-      // Fall through to create the new replacement fact
     }
 
     if (res.action === 'create' || res.action === 'invalidate_existing') {
@@ -185,12 +190,11 @@ export async function extractAndResolve(
       `;
       factsCreated++;
 
-      // Update entity summaries with new facts
       await updateEntitySummary(db, sourceId, [res.fact.factText]);
     }
   }
 
-  // ─── Log for fail-improve ───────────────────────────────────
+  // ─── Step 5: Log for observability ─────────────────────────
   if (options.config?.enableExtractionLog !== false) {
     await logExtraction(db, options.groupId, options.episodeId || null, extraction, text).catch(() => {});
   }
@@ -202,4 +206,101 @@ export async function extractAndResolve(
     factsCreated,
     factsInvalidated,
   };
+}
+
+// ─── Helpers ─────────────────────────────────────────────────
+
+function hasLLMConfig(config?: LLMConfig): boolean {
+  if (!config) {
+    // Check env vars
+    return !!(process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY);
+  }
+  return !!config.apiKey;
+}
+
+/**
+ * Build context about existing entities for the LLM to reference.
+ * This helps the LLM avoid creating duplicate entities and detect
+ * when new information contradicts existing facts.
+ */
+async function buildGraphContext(
+  db: postgres.Sql,
+  groupId: string,
+  deterEntities: ExtractedEntity[],
+): Promise<string | undefined> {
+  if (deterEntities.length === 0) return undefined;
+
+  const names = deterEntities.map(e => e.name);
+  const existingEntities = await db`
+    SELECT e.name, e.entity_type, e.summary,
+           array_agg(DISTINCT f.fact_text) FILTER (WHERE f.id IS NOT NULL AND f.invalid_at IS NULL) AS facts
+    FROM entities e
+    LEFT JOIN facts f ON (f.source_entity_id = e.id OR f.target_entity_id = e.id)
+    WHERE e.group_id = ${groupId}
+      AND e.name = ANY(${names})
+    GROUP BY e.id
+    LIMIT 20
+  `.catch(() => []);
+
+  if (existingEntities.length === 0) return undefined;
+
+  const lines = existingEntities.map((e: any) => {
+    const facts = e.facts?.filter(Boolean)?.join('; ') || 'no known facts';
+    return `- ${e.name} (${e.entity_type}): ${e.summary || facts}`;
+  });
+
+  return `Known entities:\n${lines.join('\n')}`;
+}
+
+/**
+ * Merge LLM and deterministic entities.
+ * LLM entities are the primary source. Deterministic entities add
+ * structured data (emails, handles) that the LLM might miss.
+ */
+function mergeEntities(
+  llmEntities: ExtractedEntity[],
+  deterEntities: ExtractedEntity[],
+): ExtractedEntity[] {
+  const merged = [...llmEntities];
+  const llmNames = new Set(llmEntities.map(e => e.name.toLowerCase()));
+
+  for (const de of deterEntities) {
+    const llmMatch = llmEntities.find(le =>
+      le.name.toLowerCase().includes(de.name.toLowerCase()) ||
+      de.name.toLowerCase().includes(le.name.toLowerCase())
+    );
+
+    if (llmMatch && de.attributes) {
+      // Merge attributes (email, handle) into the LLM entity
+      llmMatch.attributes = { ...llmMatch.attributes, ...de.attributes };
+    } else if (!llmNames.has(de.name.toLowerCase())) {
+      // Deterministic found something LLM missed — add it
+      merged.push(de);
+    }
+  }
+
+  return merged;
+}
+
+/**
+ * Merge LLM and deterministic facts.
+ * LLM facts are primary. Deterministic facts fill gaps.
+ */
+function mergeFacts(
+  llmFacts: ExtractedFact[],
+  deterFacts: ExtractedFact[],
+): ExtractedFact[] {
+  const merged = [...llmFacts];
+  const llmKeys = new Set(llmFacts.map(f =>
+    `${f.sourceName}|${f.relation}|${f.targetName}`.toLowerCase()
+  ));
+
+  for (const df of deterFacts) {
+    const key = `${df.sourceName}|${df.relation}|${df.targetName}`.toLowerCase();
+    if (!llmKeys.has(key)) {
+      merged.push(df);
+    }
+  }
+
+  return merged;
 }

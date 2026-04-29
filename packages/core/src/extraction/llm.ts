@@ -1,41 +1,67 @@
 /**
- * Layer 2: LLM-based extraction.
+ * LLM-powered extraction — the primary extraction engine.
  *
- * Falls back to LLM when deterministic extraction confidence is below
- * threshold. Uses structured output to extract entities and relationships.
+ * Uses structured output (tool_use / JSON schema) for reliable extraction.
+ * Multi-pass approach:
+ *   Pass 1: Extract entities from raw text
+ *   Pass 2: Extract relationships with entity context
+ *   Pass 3: Detect contradictions against existing graph (in resolver)
  *
- * Every LLM call is logged to the extraction_log for the fail-improve loop.
+ * The deterministic layer is now a pre-filter that catches obvious
+ * structured data (emails, URLs) before the LLM sees the text.
  */
 
 import type { ExtractedEntity, ExtractedFact, LLMConfig } from '../types.js';
 
-const EXTRACTION_PROMPT = `You are an entity and relationship extractor. Given text, extract:
+const EXTRACTION_SYSTEM_PROMPT = `You are a precise knowledge graph extraction engine. Your job is to extract structured entities and relationships from text.
 
-1. ENTITIES: People, companies, projects, decisions, concepts, events mentioned.
-   For each: name, type (person/company/project/decision/concept/event), and any attributes.
+You must return valid JSON with this exact schema:
 
-2. FACTS: Relationships between entities.
-   For each: source entity name, target entity name, relation type, natural language description.
-
-   Valid relation types: works_at, founded, advises, invested_in, owns, contributes_to,
-   decided, blocked_by, attended, mentions, related_to
-
-3. TEMPORAL: If dates or time references are mentioned, include them.
-
-Respond with JSON only:
 {
-  "entities": [{"name": "...", "entityType": "...", "attributes": {...}, "confidence": 0.0-1.0}],
-  "facts": [{"sourceName": "...", "targetName": "...", "relation": "...", "factText": "...", "validAt": "ISO date or null", "confidence": 0.0-1.0}]
+  "entities": [
+    {
+      "name": "Full proper name",
+      "entityType": "person|company|project|decision|concept|event|document",
+      "attributes": {"key": "value"},
+      "confidence": 0.0-1.0
+    }
+  ],
+  "facts": [
+    {
+      "sourceName": "Entity name (must match an entity above)",
+      "targetName": "Entity name (must match an entity above)",
+      "relation": "works_at|founded|advises|invested_in|owns|contributes_to|decided|blocked_by|attended|mentions|related_to",
+      "factText": "Natural language description of this relationship",
+      "validAt": "ISO date if mentioned, null otherwise",
+      "confidence": 0.0-1.0
+    }
+  ]
 }
 
-Be precise. Only extract what is explicitly stated or strongly implied.
-Set confidence lower for inferences vs explicit statements.`;
+Rules:
+- Extract ALL entities mentioned — people, companies, projects, products, decisions, events
+- Extract ALL relationships — employment, ownership, decisions, dependencies, mentions
+- Use the FULL proper name (e.g., "Alice Chen" not "Alice")
+- Set confidence based on how explicit the statement is:
+  - 0.95: explicitly stated ("Alice is CTO of Acme")
+  - 0.8: strongly implied ("Alice from Acme" implies works_at)
+  - 0.6: inferred ("they discussed Acme" — who are "they"?)
+- For temporal info, include ISO dates in validAt
+- Capture decisions as entities (type: "decision") AND as facts (relation: "decided")
+- When someone's role/title is mentioned, create a works_at fact with the role in factText
+- Do NOT hallucinate entities or relationships not present in the text
+- Return ONLY the JSON, no markdown fences or explanation`;
 
 export interface LLMExtractionResult {
   entities: ExtractedEntity[];
   facts: ExtractedFact[];
 }
 
+/**
+ * Extract entities and relationships using an LLM.
+ * This is the primary extraction method — reliable, context-aware,
+ * handles nuance, paraphrase, and implicit relationships.
+ */
 export async function extractWithLLM(
   text: string,
   config?: LLMConfig,
@@ -60,14 +86,12 @@ async function extractWithAnthropic(
     apiKey: config?.apiKey || process.env.ANTHROPIC_API_KEY,
   });
 
-  const userMessage = existingContext
-    ? `Context from existing knowledge graph:\n${existingContext}\n\nNew text to extract from:\n${text}`
-    : text;
+  const userMessage = buildUserMessage(text, existingContext);
 
   const response = await client.messages.create({
-    model: config?.model || 'claude-haiku-4-5-20251001',
+    model: config?.model || 'claude-sonnet-4-20250514',
     max_tokens: 4096,
-    system: EXTRACTION_PROMPT,
+    system: EXTRACTION_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: userMessage }],
   });
 
@@ -89,15 +113,13 @@ async function extractWithOpenAI(
     apiKey: config?.apiKey || process.env.OPENAI_API_KEY,
   });
 
-  const userMessage = existingContext
-    ? `Context from existing knowledge graph:\n${existingContext}\n\nNew text to extract from:\n${text}`
-    : text;
+  const userMessage = buildUserMessage(text, existingContext);
 
   const response = await client.chat.completions.create({
     model: config?.model || 'gpt-4o-mini',
     response_format: { type: 'json_object' },
     messages: [
-      { role: 'system', content: EXTRACTION_PROMPT },
+      { role: 'system', content: EXTRACTION_SYSTEM_PROMPT },
       { role: 'user', content: userMessage },
     ],
   });
@@ -106,6 +128,17 @@ async function extractWithOpenAI(
   if (!content) return { entities: [], facts: [] };
 
   return parseExtractionResponse(content);
+}
+
+function buildUserMessage(text: string, existingContext?: string): string {
+  let msg = '';
+
+  if (existingContext) {
+    msg += `EXISTING KNOWLEDGE GRAPH CONTEXT (use this to avoid duplicates and detect changes):\n${existingContext}\n\n`;
+  }
+
+  msg += `TEXT TO EXTRACT FROM:\n${text}`;
+  return msg;
 }
 
 function parseExtractionResponse(text: string): LLMExtractionResult {
@@ -132,7 +165,6 @@ function parseExtractionResponse(text: string): LLMExtractionResult {
       })),
     };
   } catch {
-    // If JSON parsing fails, return empty
     return { entities: [], facts: [] };
   }
 }

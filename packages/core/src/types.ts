@@ -195,10 +195,8 @@ export interface LLMConfig {
 }
 
 export interface ExtractionConfig {
-  /** Confidence threshold below which LLM fallback is triggered */
-  llmFallbackThreshold?: number;
-  /** Whether to log all extractions for the fail-improve loop */
+  /** Whether to log all extractions for observability */
   enableExtractionLog?: boolean;
-  /** Custom deterministic patterns per entity type */
+  /** Custom deterministic patterns per entity type (supplements LLM) */
   patterns?: Record<string, RegExp[]>;
 }

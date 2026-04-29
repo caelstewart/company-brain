@@ -4,10 +4,10 @@
 
 Company Brain extracts entities and relationships from unstructured data, stores them as a bi-temporal knowledge graph, and makes them searchable via hybrid retrieval. It combines the best patterns from systems like [gbrain](https://github.com/garrytan/gbrain), [Graphiti/Zep](https://github.com/getzep/graphiti), and [Supermemory](https://github.com/supermemoryai/supermemory):
 
-- **Deterministic-first extraction** (instant, $0) with LLM fallback (flexible, ~$0.001/call)
+- **LLM-first extraction** - reliable, context-aware entity and relationship extraction with structured output. Deterministic pre-scan catches emails, @mentions, and URLs
 - **Bi-temporal fact model** - facts are invalidated, not deleted, so you can query "what did we know on March 1st?"
+- **Graph-aware** - the LLM receives existing graph context during extraction, so it detects changes and avoids duplicates
 - **Hybrid search** - vector + keyword + graph traversal, fused via Reciprocal Rank Fusion
-- **Self-improving** - logs every LLM fallback, suggests patterns to reduce LLM dependency over time
 - **Postgres-native** - single database, no Neo4j/Redis/Pinecone. Just Postgres + pgvector
 
 ## Architecture
@@ -17,14 +17,11 @@ Company Brain extracts entities and relationships from unstructured data, stores
 │                        Ingestion                            │
 │  Raw Text → Episode (provenance) → Extraction Pipeline      │
 │                                                             │
-│  Layer 1: Deterministic   (regex, known entities)    $0     │
-│  Layer 2: LLM Fallback    (structured extraction)    ~$0.001│
-│  Layer 3: Resolution      (dedup, contradiction)            │
-│                                                             │
-│  ┌─────────────────┐                                        │
-│  │ Fail-Improve    │ Logs fallbacks → suggests new regex    │
-│  │ Loop            │ System gets smarter over time          │
-│  └─────────────────┘                                        │
+│  Step 1: Deterministic pre-scan (emails, @mentions, URLs)   │
+│  Step 2: LLM extraction       (primary — entities + facts)  │
+│  Step 3: Merge                (LLM + structured data)       │
+│  Step 4: Resolution           (dedup, contradiction)        │
+│  Step 5: Logging              (observability)               │
 ├─────────────────────────────────────────────────────────────┤
 │                    Knowledge Graph                          │
 │                                                             │
@@ -171,25 +168,27 @@ curl http://localhost:3333/api/health
 
 ### The Extraction Pipeline
 
-When you call `brain.ingest()`, content goes through a 3-layer pipeline:
+When you call `brain.ingest()`, content goes through an LLM-first pipeline:
 
-1. **Deterministic extraction** - Regex patterns, known entity matching, and role detection. Free, instant, and handles the common cases (emails, @mentions, "X is CTO of Y" patterns).
+1. **Deterministic pre-scan** - Catches structured data the LLM might miss: email addresses, @mentions, URLs, and matches against known entities already in the graph. This supplements the LLM, not replaces it.
 
-2. **LLM fallback** - If deterministic confidence is below threshold (default 0.6), the content is sent to an LLM for structured extraction. Handles novel entity types and complex relationships.
+2. **LLM extraction (primary)** - The main extraction engine. Uses Claude or GPT with a structured output prompt to extract entities, relationships, and temporal information. The LLM receives existing graph context so it can detect changes and avoid duplicates. Handles paraphrase, implicit relationships, and nuanced context that regex never could.
 
-3. **Resolution** - Extracted entities are deduplicated against existing ones (trigram similarity + alias matching). Facts are checked for contradictions — if Alice "works at Acme" but we already have "Alice works at BigCorp", the old fact is invalidated (not deleted) and the new one is created.
+3. **Merge** - Combines LLM results with deterministic pre-scan. LLM is the authority for entities and relationships; deterministic adds structured metadata (emails, handles) that the LLM might skip.
 
-### The Fail-Improve Loop
+4. **Resolution** - Extracted entities are deduplicated against existing ones (trigram similarity + alias matching). Facts are checked for contradictions — if Alice "works at Acme" but we already have "Alice works at BigCorp", the old fact is invalidated (not deleted) and the new one is created.
 
-Every LLM fallback is logged. Over time, the system analyzes these logs and suggests new deterministic patterns:
+If no LLM API key is configured, the system falls back to deterministic-only mode (useful for testing).
+
+### Observability
+
+Every extraction is logged with its method, duration, and results:
 
 ```typescript
-const patterns = await brain.getSuggestedPatterns();
-// [{ entityType: 'company', suggestedPattern: '/acquired ([A-Z][\w\s]+)/g',
-//    examples: ['Acme Corp', 'BigTech Inc'], occurrences: 12 }]
+const stats = await brain.getExtractionStats();
+// { totalExtractions: 142, deterministicHits: 0, llmFallbacks: 0,
+//   deterministicRate: 0, topMissPatterns: [...] }
 ```
-
-This means your extraction gets cheaper and faster without manual tuning.
 
 ### Temporal Queries
 
@@ -252,15 +251,18 @@ company-brain/
 | Feature | Company Brain | gbrain | Graphiti/Zep | Supermemory |
 |---------|:---:|:---:|:---:|:---:|
 | Temporal facts (valid_at/invalid_at) | Yes | No (append-only) | Yes | Partial |
-| Deterministic extraction | Yes | Yes | No (LLM-only) | No |
-| LLM extraction fallback | Yes | No | Yes | Yes |
-| Self-improving extraction | Yes | Yes | No | No |
+| LLM-first extraction | Yes | No (regex-only) | Yes | Yes |
+| Structured data pre-scan | Yes | Yes | No | No |
+| Graph-aware extraction | Yes | No | Yes | No |
 | Custom entity/relation types | Yes | Fixed | Yes (Pydantic) | No |
 | Hybrid search (vector+keyword+graph) | Yes | Yes | Yes | Partial |
 | Point-in-time queries | Yes | No | Yes | No |
+| Contradiction detection | Yes | No | Yes | Partial |
 | Postgres-only (no Neo4j) | Yes | Yes | No (Neo4j) | N/A (SaaS) |
 | MCP server | Yes | Yes | No | No |
 | REST API | Yes | No | No | Yes (SaaS) |
+| Skill/SOP system | Yes | Yes | No | No |
+| Connectors (Slack, Notion, etc.) | Yes | No | No | Partial |
 | Open source | Yes | Yes | Yes | Partial |
 | Multi-tenant | Yes | No (personal) | No | Yes (SaaS) |
 
