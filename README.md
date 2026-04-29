@@ -2,21 +2,45 @@
 
 **Open-source temporal knowledge graph engine for AI agents and knowledge workers.**
 
-Company Brain turns unstructured text into a searchable, temporal knowledge graph. Feed it meeting transcripts, Slack messages, documents, CRM notes — it extracts entities and relationships, wires them into a graph, detects contradictions, and makes everything searchable via hybrid retrieval.
+Company Brain turns unstructured text into a searchable, temporal knowledge graph. Feed it meeting transcripts, Slack messages, Notion pages, CRM notes, design files, Linear tickets, emails, call recordings, or anything else your team produces. It extracts entities and relationships, wires them into a graph, detects contradictions over time, and makes everything searchable through hybrid retrieval.
 
 Built by studying what works and what doesn't in three systems: [gbrain](https://github.com/garrytan/gbrain) (deterministic extraction, skill-based agents), [Graphiti/Zep](https://github.com/getzep/graphiti) (temporal fact model, contradiction detection), and [Supermemory](https://github.com/supermemoryai/supermemory) (simple API, profile synthesis). Company Brain takes the best architectural decisions from each and combines them into a single Postgres-native engine.
 
-## Why This Exists
+## The Problem
 
-AI agents are smart but forgetful. Every conversation starts from zero. RAG gets you part of the way — you can retrieve documents — but documents don't capture relationships, changes over time, or the difference between what was true in March vs. what's true now.
+Someone is going to build a world-class "Brain" for enterprises and make a stupid amount of money. As David Fant put it: "Coding with AI is solved because all context is in the git repo. Knowledge work is difficult because context is spread out. An AI system that creates a git repo with all context for a knowledge worker will be able to 100% automate the work."
 
-A knowledge graph solves this. But existing knowledge graph tools force tradeoffs:
+Engineering has been prepared for this moment for a long time because of the deterministic nature of code, the centralization of data in version control, and AI tools largely built by engineers for engineers. But for the rest of white collar work, there is a ton of catching up to do.
 
-- **gbrain** uses zero-LLM regex extraction. Cheap and fast, but brittle — misses paraphrased relationships, implicit context, anything that doesn't match a hardcoded pattern. Fixed entity types, no temporal model.
-- **Graphiti/Zep** uses LLM for everything and has a proper temporal fact model, but requires Neo4j alongside Postgres, and the LLM-for-every-extraction approach is expensive at scale.
-- **Supermemory** has the cleanest API but is a black box SaaS. No graph exposure, no self-hosting, no custom ontology.
+The core challenge breaks down into four problems. Nobody has truly cracked all of them yet. Here is where Company Brain stands on each.
 
-Company Brain's thesis: **LLM-first extraction for reliability, Postgres-native for simplicity, bi-temporal facts for truth tracking, and a skill system so agents know HOW to use the brain, not just that it exists.**
+### 1. Knowledge is Distributed
+
+Transcripts live in Granola. Documents in Notion. Customer data in HubSpot. Design files in Figma. Sprint boards in Linear. Conversations in Slack. The first step is building an ingestion engine that connects to your disparate data sources and auto-updates based on the shelf life of the data.
+
+**How we handle it.** Company Brain ships with a connector framework that normalizes any external source into "episodes" (timestamped, immutable records of raw content). Built-in connectors cover Slack, Notion, and the local filesystem. The `Connector` interface is intentionally simple: implement `sync()` to return episodes, and the extraction pipeline handles the rest. Adding a connector for Figma, HubSpot, Linear, Google Docs, email, or any other source is a matter of writing one class that fetches data and returns text. Incremental sync is supported natively (each connector tracks its own cursor/timestamp so it only pulls new data on subsequent runs). This is the easiest of the four problems, and it is largely solved in the current architecture.
+
+### 2. Knowledge is Unstructured
+
+Creating a proposal that pulls the right details from a sales call, anchors to a proven format from past proposals, and grounds pricing in real sprint data from Linear requires the brain to self-organize in a thoughtful schema. This is hard, especially if you want a generalizable brain that can be shaped to an array of different enterprises.
+
+**How we handle it.** The extraction pipeline is LLM-first. Claude (or GPT) reads raw text and outputs structured entities, typed relationships, temporal metadata, and confidence scores. This is not regex pattern matching; it is genuine semantic understanding of who did what, when, and why. The schema is configurable through custom ontology definitions (entity types, relation types, structural constraints), scoped per workspace via `group_id`. An enterprise selling SaaS can define `deal`, `feature_request`, and `competitor` entity types with typed relations between them. A consulting firm can define `engagement`, `deliverable`, and `stakeholder`. The LLM extraction prompt adapts to whatever schema you define. Entity resolution (trigram similarity plus an alias table) prevents duplicates across sources. When the same person shows up in a Slack message, a Notion doc, and a meeting transcript, they resolve to one node in the graph.
+
+### 3. Knowledge is Unverifiable
+
+Writing a function, running a unit test, and seeing if the code works is easy. It works or it doesn't. Using AI to accelerate knowledge work is subjective. What is a good idea? Is the content in your voice? Does it feel like slop or something novel? These questions are difficult and non-verifiable.
+
+**How we handle it (partially).** Company Brain provides the infrastructure for verification but does not claim to solve this fully. Every fact carries a confidence score (0.95 for explicitly stated, 0.8 for implied, 0.6 for inferred). Every fact traces back to its source episode, so you can always check the original text. The temporal model means you can see what changed and when, which helps catch drift. The extraction logging system tracks every extraction with method, duration, and results, and the `suggestPatterns()` function identifies recurring extraction patterns a human can review.
+
+What we do not yet have: explicit user feedback loops where a knowledge worker marks an extraction as wrong and the system learns from that correction. Content quality scoring (is this output good?) remains an open problem. This is an honest gap, and solving it well is part of what will separate the winner in this space.
+
+### 4. Knowledge Needs Compaction
+
+The brain does not just have to organize and form coherent relationships. It also has to self-improve based on feedback. Memory systems are great to a point, but as you scale the corpus of data, compaction and cleaning become wildly important to avoid the needle-in-haystack problem.
+
+**How we handle it (partially).** Temporal invalidation is the primary compaction mechanism today. When Alice changes roles from VP to CRO, the old "VP" fact is invalidated (not deleted), and the new "CRO" fact takes its place. Queries return only current facts by default, so stale information does not pollute results. Entity resolution prevents duplicate nodes from accumulating. The recency boost in search scoring gives a small advantage to recent information over old information, which naturally surfaces what matters now.
+
+What we do not yet have: automatic summary condensation (collapsing 50 facts about an entity into a tighter summary), relevance decay (automatically deprioritizing facts that haven't been referenced in months), or corpus-wide cleanup jobs. These are important for any brain operating at enterprise scale with millions of facts, and they are on the roadmap.
 
 ## Quick Start
 
@@ -54,7 +78,7 @@ const brain = new Brain({
 
 await brain.init();
 
-// Ingest content — entities and facts are extracted automatically
+// Ingest content: entities and facts are extracted automatically
 await brain.ingest({
   content: `Meeting with Alice Chen from Acme Corp.
     They're upgrading from starter to enterprise plan.
@@ -68,7 +92,7 @@ const results = await brain.search({
   query: "What's happening with Acme?",
 });
 
-// Point-in-time queries — what did we know on March 1st?
+// Point-in-time queries: what did we know on March 1st?
 const marchState = await brain.search({
   query: 'Acme plan',
   asOf: new Date('2024-03-01'),
@@ -137,6 +161,7 @@ Full endpoint list: `POST /api/ingest`, `POST /api/search`, `GET /api/entities/:
                            │     Data Sources      │
                            │                       │
                            │  Slack  Notion  Files  │
+                           │  Figma  CRM   Linear  │
                            │  REST   MCP    SDK    │
                            └──────────┬───────────┘
                                       │
@@ -201,18 +226,19 @@ Full endpoint list: `POST /api/ingest`, `POST /api/search`, `GET /api/entities/:
 
 ### Why Entities + Facts + Episodes
 
-Most knowledge systems store either documents (RAG) or triples (traditional KG). Both have problems:
+Most knowledge systems store either documents (RAG) or triples (traditional KG). Both have problems.
 
-- **Documents** lose structure. "Alice is CTO of Acme" is buried in paragraph 3 of a meeting transcript. Searching for "who works at Acme" requires the LLM to parse every document every time.
-- **Triples** (`Alice → works_at → Acme`) lose context. When did this become true? What's the evidence? What if she changed jobs?
+**Documents** lose structure. "Alice is CTO of Acme" is buried in paragraph 3 of a meeting transcript. Searching for "who works at Acme" requires the LLM to parse every document every time.
 
-Company Brain uses three primitives that solve both:
+**Triples** (`Alice -> works_at -> Acme`) lose context. When did this become true? What is the evidence? What if she changed jobs?
 
-**Episodes** are raw data — the meeting transcript, the Slack message, the document. They're immutable and timestamped. This is your audit trail. Every fact traces back to an episode.
+Company Brain uses three primitives that solve both.
 
-**Entities** are the nodes — people, companies, projects, decisions, concepts. Each entity has a name, type, summary (auto-maintained from facts), attributes (JSONB), and a vector embedding for semantic search. Entity deduplication uses trigram similarity (`pg_trgm`) + an alias table that maps surface forms ("Bob", "Robert Smith", "bob@acme.com") to the canonical entity.
+**Episodes** are raw data: the meeting transcript, the Slack message, the document. They are immutable and timestamped. This is your audit trail. Every fact traces back to an episode.
 
-**Facts** are the edges — temporal relationships between entities. This is the core innovation. A fact has:
+**Entities** are the nodes: people, companies, projects, decisions, concepts. Each entity has a name, type, summary (auto-maintained from facts), attributes (JSONB), and a vector embedding for semantic search. Entity deduplication uses trigram similarity (`pg_trgm`) plus an alias table that maps surface forms ("Bob", "Robert Smith", "bob@acme.com") to the canonical entity.
+
+**Facts** are the edges: temporal relationships between entities. This is the core innovation. A fact has:
 
 | Field | Purpose |
 |-------|---------|
@@ -222,10 +248,10 @@ Company Brain uses three primitives that solve both:
 | `valid_at` | When this fact became true |
 | `invalid_at` | When this fact was superseded (NULL = still true) |
 | `confidence` | 0.0-1.0 extraction confidence |
-| `source_episode_id` | Provenance — which raw data produced this fact |
+| `source_episode_id` | Provenance: which raw data produced this fact |
 | `fact_embedding` | Vector for semantic search |
 
-When new information contradicts an existing fact, the old fact's `invalid_at` is set — it's never deleted. This is the **bi-temporal model** from Graphiti/Zep, and it's what lets you ask "what did we know about Alice on March 1st?" and get a different answer than "what do we know about Alice now?"
+When new information contradicts an existing fact, the old fact's `invalid_at` is set. It is never deleted. This is the **bi-temporal model** from Graphiti/Zep, and it is what lets you ask "what did we know about Alice on March 1st?" and get a different answer than "what do we know about Alice now?"
 
 ### The Schema
 
@@ -283,7 +309,7 @@ Entity types and relation types are stored in the database (not hardcoded), scop
 
 ### Multi-Tenancy
 
-Every table has a `group_id` column. A group is a workspace — one brain can serve multiple teams, projects, or tenants. The default group is `'default'`. All queries are group-scoped. This is how you run one Postgres instance for an entire company without data leaking between teams.
+Every table has a `group_id` column. A group is a workspace: one brain can serve multiple teams, projects, or tenants. The default group is `'default'`. All queries are group-scoped. This is how you run one Postgres instance for an entire company without data leaking between teams.
 
 ---
 
@@ -295,9 +321,9 @@ This is the most important architectural decision in the system. We studied thre
 
 gbrain uses regex-first extraction: hardcoded patterns like `([A-Z][a-zA-Z]+), CEO of ([A-Z][a-zA-Z\s]+)` catch structured relationships, and anything the regex misses is simply not extracted. This is fast and free, but fundamentally brittle:
 
-- "Alice leads the engineering team at Acme" — no regex catches "leads"
-- "The deal with Acme fell through after Bob left" — implicit relationship change
-- "She mentioned they're evaluating competitors" — "she" and "they" require coreference
+- "Alice leads the engineering team at Acme": no regex catches "leads"
+- "The deal with Acme fell through after Bob left": implicit relationship change
+- "She mentioned they're evaluating competitors": "she" and "they" require coreference
 
 Graphiti/Zep uses LLM-for-everything, which is reliable but expensive. Every piece of text hits an LLM even when the content is structured data the LLM adds no value to (email addresses, @mentions, dates).
 
@@ -305,23 +331,23 @@ Graphiti/Zep uses LLM-for-everything, which is reliable but expensive. Every pie
 
 The LLM is the primary extraction engine. It handles nuance, paraphrase, implicit relationships, and context. The deterministic layer is a pre-scan that catches structured signals (emails, URLs, @mentions) and matches against known entities in the graph. These get merged into the LLM results, not used instead of them.
 
-### The Pipeline In Detail
+### The Pipeline in Detail
 
 When you call `brain.ingest(input)`:
 
-**Step 0: Episode storage.** The raw content is stored as an immutable episode with its embedding. This happens before extraction — even if extraction fails, you have the raw data.
+**Step 0: Episode storage.** The raw content is stored as an immutable episode with its embedding. This happens before extraction. Even if extraction fails, you have the raw data.
 
 **Step 1: Deterministic pre-scan.** Fast regex pass (~1ms) catches:
-- Email addresses → person entities with `{ email }` attribute
-- @mentions → person entities with `{ handle }` attribute
-- Known entity matching → any entity name already in the graph (via alias table) gets flagged at 0.95 confidence
+- Email addresses, which become person entities with `{ email }` attribute
+- @mentions, which become person entities with `{ handle }` attribute
+- Known entity matching: any entity name already in the graph (via alias table) gets flagged at 0.95 confidence
 
-This is NOT the extraction engine. This is a metadata supplement.
+This is not the extraction engine. This is a metadata supplement.
 
 **Step 2: LLM extraction.** The content is sent to Claude (Sonnet) or GPT with a structured output prompt. The prompt includes:
 - Entity type definitions and relationship types
 - Confidence calibration guidelines (0.95 for explicit, 0.8 for implied, 0.6 for inferred)
-- **Existing graph context** — facts about known entities mentioned in the text, so the LLM can detect changes ("Alice was VP, now the text says CRO" → this is a role change, not a duplicate)
+- **Existing graph context**: facts about known entities mentioned in the text, so the LLM can detect changes ("Alice was VP, now the text says CRO" means this is a role change, not a duplicate)
 
 The LLM returns structured JSON with entities, facts, temporal information, and per-item confidence scores.
 
@@ -330,14 +356,14 @@ The LLM returns structured JSON with entities, facts, temporal information, and 
 **Step 4: Resolution.** Each extracted entity is resolved against the existing graph:
 1. Exact alias match (alias table, instant)
 2. Trigram similarity match (pg_trgm, `similarity() > 0.7`)
-3. No match → create new entity + register alias
+3. No match: create new entity and register alias
 
 Each extracted fact is checked for contradictions:
-- Same source/target/relation, same text → **skip** (duplicate)
-- Same source/target, exclusive relation (works_at, founded), different text → **invalidate old fact**, create new one
-- Same source/target, non-exclusive relation → **create alongside** existing
+- Same source/target/relation, same text: **skip** (duplicate)
+- Same source/target, exclusive relation (works_at, founded), different text: **invalidate old fact**, create new one
+- Same source/target, non-exclusive relation: **create alongside** existing
 
-**Step 5: Logging.** Every extraction is logged to `extraction_log` with method, entities/facts extracted, confidence, and duration. This powers observability.
+**Step 5: Logging.** Every extraction is logged to `extraction_log` with method, entities/facts extracted, confidence, and duration. This powers the observability system.
 
 ### Fallback Mode
 
@@ -391,21 +417,21 @@ Running all four and fusing results means no query type falls through the cracks
 
 ### Reciprocal Rank Fusion
 
-RRF is how we combine ranked results from different retrieval methods without needing to normalize their scores (which are on incompatible scales — cosine similarity vs. BM25 rank vs. graph distance).
+RRF is how we combine ranked results from different retrieval methods without needing to normalize their scores (which are on incompatible scales: cosine similarity vs. BM25 rank vs. graph distance).
 
 For each result appearing in any list at rank `r`, its RRF score is: `1 / (k + r)` where `k = 60`. If a result appears in multiple lists, its scores are summed. This naturally boosts results that appear across multiple retrieval methods (high agreement = high relevance).
 
-After fusion, a **recency boost** applies a logarithmic decay: `score *= 1 + 0.1 * max(0, 1 - log(ageInDays + 1) / log(365))`. Recent facts get a small bump; old facts aren't penalized much. This means "Alice is CRO at Acme" (1 week old) scores slightly higher than "Alice joined Acme" (2 years old), which matches how knowledge workers think about relevance.
+After fusion, a **recency boost** applies a logarithmic decay: `score *= 1 + 0.1 * max(0, 1 - log(ageInDays + 1) / log(365))`. Recent facts get a small bump; old facts are not penalized much. This means "Alice is CRO at Acme" (1 week old) scores slightly higher than "Alice joined Acme" (2 years old), which matches how knowledge workers think about relevance.
 
 ---
 
 ## The Skill System
 
-Skills are markdown SOPs (Standard Operating Procedures) that teach AI agents HOW to use the brain. This is the pattern from gbrain — intelligence lives in the skill files, not in hardcoded logic.
+Skills are markdown SOPs (Standard Operating Procedures) that teach AI agents HOW to use the brain. This is the pattern from gbrain: intelligence lives in the skill files, not in hardcoded logic.
 
 ### Why Skills Matter
 
-Without skills, an agent with access to `brain.search()` and `brain.ingest()` will use them naively — searching with bad queries, ingesting noise, missing the READ → ENRICH → WRITE loop. Skills encode operational knowledge:
+Without skills, an agent with access to `brain.search()` and `brain.ingest()` will use them naively, searching with bad queries, ingesting noise, missing the READ then ENRICH then WRITE loop. Skills encode operational knowledge:
 
 | Skill | Type | What It Teaches |
 |-------|------|-----------------|
@@ -421,7 +447,7 @@ Without skills, an agent with access to `brain.search()` and `brain.ingest()` wi
 
 The `SkillResolver` matches user intent to the right skill using two-phase matching:
 
-1. **Deterministic**: exact trigger match (1.0 confidence) → substring match (0.8-0.95) → keyword overlap (up to 0.7)
+1. **Deterministic**: exact trigger match (1.0 confidence), then substring match (0.8-0.95), then keyword overlap (up to 0.7)
 2. **Priority tiebreaking**: when confidence is equal, higher-priority skills win
 
 The resolver also generates a markdown routing table (`resolver.toRoutingTable()`) that can be injected into an LLM's system prompt, giving it a menu of available operations.
@@ -462,7 +488,7 @@ interface Connector {
 
 ### Built-in Connectors
 
-**Filesystem** — Watches a directory of markdown/text files. Incremental sync via file modification time. Useful for wikis, knowledge bases, and local documentation.
+**Filesystem.** Watches a directory of markdown/text files. Incremental sync via file modification time. Useful for wikis, knowledge bases, and local documentation.
 
 ```typescript
 import { Brain, ConnectorRegistry, FilesystemConnector } from '@company-brain/core';
@@ -479,11 +505,15 @@ await registry.connect({
 await registry.sync('docs'); // ingests all .md files
 ```
 
-**Slack** — Fetches messages from channels via `conversations.history` API. Supports both polling (sync) and push (Events API webhooks). Requires `channels:history` and `channels:read` scopes.
+**Slack.** Fetches messages from channels via `conversations.history` API. Supports both polling (sync) and push (Events API webhooks). Requires `channels:history` and `channels:read` scopes.
 
-**Notion** — Fetches pages from databases via Notion API. Converts block structure to markdown for extraction. Supports incremental sync via `last_edited_time`.
+**Notion.** Fetches pages from databases via Notion API. Converts block structure to markdown for extraction. Supports incremental sync via `last_edited_time`.
 
-The `ConnectorRegistry` orchestrates sync operations, handles errors per-episode (one failure doesn't block others), and supports `syncAll()` for batch operations.
+### Adding Your Own Connectors
+
+The connector interface is designed to be extended. A Figma connector would fetch design file metadata and comments. A HubSpot connector would pull deal records and contact notes. A Linear connector would sync issue descriptions and comments. A Google Docs connector would pull document content. Each one normalizes its data into `EpisodeInput[]` and the rest of the pipeline (extraction, resolution, search indexing) happens automatically.
+
+The `ConnectorRegistry` orchestrates sync operations, handles errors per-episode (one failure does not block others), and supports `syncAll()` for batch operations.
 
 ---
 
@@ -510,7 +540,7 @@ const patterns = await brain.getSuggestedPatterns(5);
 //    examples: ['Acme Corp', 'BigTech Inc'], occurrences: 12 }]
 ```
 
-This is the **fail-improve loop** from gbrain — the system identifies what the LLM handles repeatedly and suggests deterministic shortcuts a developer can review and approve.
+This is the **fail-improve loop** from gbrain. The system identifies what the LLM handles repeatedly and suggests deterministic shortcuts a developer can review and approve.
 
 ---
 
@@ -518,7 +548,7 @@ This is the **fail-improve loop** from gbrain — the system identifies what the
 
 ### Why Postgres-Only (No Neo4j)
 
-Graphiti requires Neo4j for graph storage and Postgres for everything else. This means two databases to deploy, monitor, backup, and keep in sync. For most teams, the operational complexity isn't worth it.
+Graphiti requires Neo4j for graph storage and Postgres for everything else. This means two databases to deploy, monitor, backup, and keep in sync. For most teams, the operational complexity is not worth it.
 
 PostgreSQL with pgvector, pg_trgm, and standard indexes handles everything we need:
 - **Graph traversal**: recursive CTEs or simple JOINs through the facts table (entities joined via source/target)
@@ -533,13 +563,13 @@ One database. One backup. One connection pool. For the scale most teams operate 
 
 We initially built the system deterministic-first (like gbrain). It was fast and cheap but missed too much. Real-world text is messy:
 
-- "The Acme folks said they're going with us" — who are "the Acme folks"? Which "us"?
-- "Alice is taking over Bob's accounts" — this implies Bob had accounts AND Alice now has them
-- "Decided to sunset the starter tier" — this is a decision entity AND a fact about a product
+- "The Acme folks said they're going with us": who are "the Acme folks"? Which "us"?
+- "Alice is taking over Bob's accounts": this implies Bob had accounts AND Alice now has them
+- "Decided to sunset the starter tier": this is a decision entity AND a fact about a product
 
 Regex catches "Alice Chen, CEO of Acme Corp" but not the other 80% of how humans actually communicate information. For a system that needs to be reliable and smart, the LLM has to be the primary extractor.
 
-The deterministic layer still adds value as a pre-scan: it catches structured data (email addresses, @handles) that the LLM might overlook, and it matches known entities from the alias table for faster resolution. But it supplements the LLM — it doesn't replace it.
+The deterministic layer still adds value as a pre-scan: it catches structured data (email addresses, @handles) that the LLM might overlook, and it matches known entities from the alias table for faster resolution. But it supplements the LLM. It does not replace it.
 
 ### Why Bi-Temporal Facts (Not Append-Only)
 
@@ -551,11 +581,11 @@ Company Brain invalidates the old fact instead. The old fact's `invalid_at` time
 - `getFacts(aliceId, { asOf: new Date('2024-03-16') })` shows what was true on March 16
 - `getFacts(aliceId)` shows only current facts
 
-The contradiction detection happens during resolution: for **exclusive relations** (works_at, founded — a person can only work at one company at a time), a new fact with the same relation type automatically invalidates the old one. For **non-exclusive relations** (mentions, related_to), new facts are added alongside existing ones.
+The contradiction detection happens during resolution: for **exclusive relations** (works_at, founded, where a person can only work at one company at a time), a new fact with the same relation type automatically invalidates the old one. For **non-exclusive relations** (mentions, related_to), new facts are added alongside existing ones.
 
 ### Why Skills (Not Just an API)
 
-An agent with access to `brain.search()` will call it. But it won't know to:
+An agent with access to `brain.search()` will call it. But it will not know to:
 1. Check the brain before searching the web
 2. Write new information back after learning it
 3. Use temporal queries for historical questions
@@ -568,7 +598,7 @@ This is the "thin harness, fat skills" pattern from gbrain: the runtime is minim
 
 ### Why Structured Output (Not Free-Form LLM)
 
-The LLM extraction prompt requires JSON output with a specific schema. Not natural language descriptions of entities — structured data the pipeline can directly process. This means:
+The LLM extraction prompt requires JSON output with a specific schema. Not natural language descriptions of entities, but structured data the pipeline can directly process. This means:
 
 - Entity types are constrained to the ontology
 - Relation types are constrained to defined types
@@ -587,7 +617,7 @@ company-brain/
 ├── packages/
 │   ├── core/                           # The engine
 │   │   ├── src/
-│   │   │   ├── index.ts                # Brain class — public API surface
+│   │   │   ├── index.ts                # Brain class, public API surface
 │   │   │   ├── types.ts                # All TypeScript interfaces
 │   │   │   ├── schema.sql              # Postgres schema (pgvector + temporal + trgm)
 │   │   │   ├── db.ts                   # Connection management (postgres.js)
@@ -602,7 +632,7 @@ company-brain/
 │   │   │   │   └── index.ts            # Hybrid search: semantic+keyword+graph+temporal
 │   │   │   ├── skills/
 │   │   │   │   ├── types.ts            # Skill, SkillMatch, ResolverConfig
-│   │   │   │   ├── resolver.ts         # Intent → skill matching
+│   │   │   │   ├── resolver.ts         # Intent to skill matching
 │   │   │   │   ├── defaults.ts         # 7 built-in skills (SOPs)
 │   │   │   │   └── index.ts
 │   │   │   └── connectors/
@@ -635,8 +665,8 @@ company-brain/
 
 ### Key Files
 
-| File | Purpose | Why It's Important |
-|------|---------|-------------------|
+| File | Purpose | Why It Matters |
+|------|---------|----------------|
 | `core/src/index.ts` | Brain class | The public API. Everything else is implementation detail. |
 | `core/src/schema.sql` | Database schema | Defines the data model: entities, facts, episodes, aliases, extraction_log. All indexes. |
 | `core/src/extraction/index.ts` | Pipeline orchestrator | The LLM-first extraction flow. Controls the merge strategy between deterministic and LLM results. |
@@ -673,7 +703,7 @@ company-brain/
 ## Testing
 
 ```bash
-# Unit tests (no database needed) — 33 tests
+# Unit tests (no database needed): 33 tests
 npm test
 
 # Integration tests (needs Postgres)
@@ -688,7 +718,7 @@ The test suite covers:
 - **Extraction**: entity extraction from emails, @mentions, role patterns, known entities, custom hints. Fact extraction from role patterns, decisions. Confidence assessment heuristics.
 - **Skills**: resolver matching for all 7 skills, custom skill registration, routing table generation, always-on skill detection.
 - **Search**: cosine similarity correctness.
-- **Integration**: full pipeline (ingest → extract → resolve → search), contradiction detection, temporal queries, extraction stats.
+- **Integration**: full pipeline (ingest, extract, resolve, search), contradiction detection, temporal queries, extraction stats.
 
 ---
 
@@ -696,10 +726,10 @@ The test suite covers:
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `DATABASE_URL` | Yes | — | PostgreSQL connection string |
-| `OPENAI_API_KEY` | For search | — | Embeddings (text-embedding-3-large) |
-| `ANTHROPIC_API_KEY` | For extraction | — | LLM extraction (Claude Sonnet) |
-| `BRAIN_AUTH_TOKEN` | No | — | REST API bearer token |
+| `DATABASE_URL` | Yes | | PostgreSQL connection string |
+| `OPENAI_API_KEY` | For search | | Embeddings (text-embedding-3-large) |
+| `ANTHROPIC_API_KEY` | For extraction | | LLM extraction (Claude Sonnet) |
+| `BRAIN_AUTH_TOKEN` | No | | REST API bearer token |
 | `BRAIN_GROUP_ID` | No | `default` | Default workspace/tenant |
 | `BRAIN_REST_PORT` | No | `3333` | REST API port |
 | `BRAIN_REST_HOST` | No | `127.0.0.1` | REST API bind address |
