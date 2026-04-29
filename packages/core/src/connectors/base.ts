@@ -24,7 +24,7 @@ export abstract class AbstractConnector<TConfig = unknown> implements Connector 
   abstract readonly name: string;
 
   /** Zod schema for config validation. Parsed in init(). */
-  abstract readonly configSchema: z.ZodType<TConfig>;
+  abstract readonly configSchema: z.ZodType<TConfig, z.ZodTypeDef, any>;
 
   protected config!: TConfig;
   protected groupId?: string;

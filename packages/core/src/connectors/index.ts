@@ -7,4 +7,6 @@ export { SlackConnector, SlackConfigSchema } from './slack.js';
 export type { SlackConfig } from './slack.js';
 export { NotionConnector, NotionConfigSchema } from './notion.js';
 export type { NotionConfig } from './notion.js';
+export { NangoConnector, NangoConfigSchema } from './nango.js';
+export type { NangoConfig } from './nango.js';
 export type { Connector, SyncOptions, SyncResult, ConnectorConfig } from './types.js';

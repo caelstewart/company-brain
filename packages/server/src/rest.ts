@@ -13,6 +13,7 @@ import {
   FilesystemConnector,
   SlackConnector,
   NotionConnector,
+  NangoConnector,
 } from '@company-brain/core';
 import type { BrainConfig } from '@company-brain/core';
 
@@ -33,6 +34,7 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
   registry.register(new FilesystemConnector());
   registry.register(new SlackConnector());
   registry.register(new NotionConnector());
+  registry.register(new NangoConnector());
 
   const routes = new Map<string, RouteHandler>();
 
