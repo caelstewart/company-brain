@@ -18,9 +18,11 @@ async function main() {
     embedding: process.env.OPENAI_API_KEY
       ? { provider: 'openai', apiKey: process.env.OPENAI_API_KEY }
       : undefined,
-    llm: process.env.ANTHROPIC_API_KEY
-      ? { provider: 'anthropic', apiKey: process.env.ANTHROPIC_API_KEY }
-      : undefined,
+    llm: process.env.OPENAI_API_KEY
+      ? { provider: 'openai', apiKey: process.env.OPENAI_API_KEY }
+      : process.env.ANTHROPIC_API_KEY
+        ? { provider: 'anthropic', apiKey: process.env.ANTHROPIC_API_KEY }
+        : undefined,
   });
 
   // Initialize database schema

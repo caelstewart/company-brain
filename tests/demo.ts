@@ -5,7 +5,7 @@
  * This script exercises the entire system with detailed logging
  * so you can see exactly how the knowledge graph works:
  *
- * 1. Deterministic extraction (regex, patterns)
+ * 1. LLM-first extraction with structural pre-scan
  * 2. Entity/fact resolution (dedup, contradiction detection)
  * 3. Graph wiring (entities linked via temporal facts)
  * 4. Hybrid search (keyword + graph traversal)
@@ -55,15 +55,15 @@ async function main() {
 
   // ─── Connect & Init ──────────────────────────────────────
   const hasLLM = !!(process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY);
-  log('INIT', `LLM available: ${hasLLM ? 'yes (will use LLM-first extraction)' : 'no (deterministic-only mode)'}`);
+  log('INIT', `LLM available: ${hasLLM ? 'yes (will use LLM-first extraction)' : 'no (triage will hold ingests as ephemeral)'}`);
 
   const brain = new Brain({
     database: DB,
     defaultGroupId: GROUP,
-    llm: process.env.ANTHROPIC_API_KEY
-      ? { provider: 'anthropic', apiKey: process.env.ANTHROPIC_API_KEY }
-      : process.env.OPENAI_API_KEY
-        ? { provider: 'openai', apiKey: process.env.OPENAI_API_KEY }
+    llm: process.env.OPENAI_API_KEY
+      ? { provider: 'openai', apiKey: process.env.OPENAI_API_KEY }
+      : process.env.ANTHROPIC_API_KEY
+        ? { provider: 'anthropic', apiKey: process.env.ANTHROPIC_API_KEY }
         : undefined,
     embedding: process.env.OPENAI_API_KEY
       ? { provider: 'openai', apiKey: process.env.OPENAI_API_KEY }
@@ -102,7 +102,7 @@ async function main() {
       Action: Schedule follow-up with @bobz next week.`,
     },
     {
-      label: 'Narrative (hard for deterministic)',
+      label: 'Narrative',
       text: `The quarterly board meeting covered several strategic topics.
       Revenue growth exceeded expectations at 34% YoY. The team
       discussed expanding into the European market, particularly
@@ -383,9 +383,7 @@ async function main() {
   });
 
   if (stats.totalExtractions > 0) {
-    log('INSIGHT', stats.deterministicRate >= 0.7
-      ? 'System is in good shape — >70% deterministic'
-      : 'System needs more patterns — suggest running getSuggestedPatterns()');
+    log('INSIGHT', 'Review getSuggestedPatterns() for schema, prompt, and eval improvement suggestions.');
   }
 
   // ════════════════════════════════════════════════════════════

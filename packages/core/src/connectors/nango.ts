@@ -27,7 +27,7 @@ export const NangoConfigSchema = z.object({
   secretKey: z.string().min(1, 'Nango secret key is required'),
   /** Nango host. Defaults to cloud (https://api.nango.dev). Use your URL for self-hosted. */
   host: z.string().optional().default('https://api.nango.dev'),
-  /** Integration ID in Nango (e.g. 'slack', 'hubspot', 'notion') */
+  /** Integration ID in Nango (e.g. 'hubspot', 'linear', 'google-drive') */
   providerConfigKey: z.string().min(1, 'providerConfigKey is required'),
   /** Connection ID in Nango (identifies the specific account/user connected) */
   connectionId: z.string().min(1, 'connectionId is required'),
@@ -111,6 +111,7 @@ export class NangoConnector extends AbstractConnector<NangoConfig> {
             nangoConnectionId: this.config.connectionId,
             ...this.extractMetadata(record),
           },
+          visibility: this.extractVisibility(record),
         });
       }
 
@@ -220,6 +221,44 @@ export class NangoConnector extends AbstractConnector<NangoConfig> {
     }
 
     return meta;
+  }
+
+  private extractVisibility(record: any) {
+    const acl = record.permissions || record.acl || record.visibility;
+    const provider = this.config.providerConfigKey;
+    const allowedUsers = this.extractIds(acl?.users || acl?.allowed_users || record.visible_user_ids);
+    const allowedGroups = this.extractIds(acl?.groups || acl?.teams || acl?.allowed_groups || record.visible_group_ids);
+    const deniedUsers = this.extractIds(acl?.denied_users);
+    const deniedGroups = this.extractIds(acl?.denied_groups);
+
+    return {
+      sourceSystem: provider,
+      inheritedFrom: record.id || record.external_id,
+      allowedPrincipals: allowedUsers.map(id => `${provider}:user:${id}`),
+      allowedGroups: allowedGroups.map(id => `${provider}:${id}`),
+      deniedPrincipals: deniedUsers.map(id => `${provider}:user:${id}`),
+      deniedGroups: deniedGroups.map(id => `${provider}:${id}`),
+      sourceAcl: [
+        ...allowedUsers.map(id => ({ provider, id, type: 'user' as const, access: 'allow' as const })),
+        ...allowedGroups.map(id => ({ provider, id, type: 'group' as const, access: 'allow' as const })),
+        ...deniedUsers.map(id => ({ provider, id, type: 'user' as const, access: 'deny' as const })),
+        ...deniedGroups.map(id => ({ provider, id, type: 'group' as const, access: 'deny' as const })),
+      ],
+    };
+  }
+
+  private extractIds(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map(item => {
+        if (typeof item === 'string') return item;
+        if (item && typeof item === 'object') {
+          const record = item as Record<string, unknown>;
+          return record.id || record.user_id || record.group_id || record.team_id;
+        }
+        return undefined;
+      })
+      .filter((item): item is string => typeof item === 'string' && item.length > 0);
   }
 
   private getNestedValue(obj: any, path: string): string | undefined {

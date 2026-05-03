@@ -1,19 +1,64 @@
 /**
  * LLM-powered extraction — the primary extraction engine.
  *
- * Uses structured output (tool_use / JSON schema) for reliable extraction.
- * Multi-pass approach:
- *   Pass 1: Extract entities from raw text
- *   Pass 2: Extract relationships with entity context
- *   Pass 3: Detect contradictions against existing graph (in resolver)
- *
- * The deterministic layer is now a pre-filter that catches obvious
- * structured data (emails, URLs) before the LLM sees the text.
+ * The extraction prompt is fully dynamic — entity types and relation types
+ * are loaded from the database schema, not hardcoded. This means the system
+ * works for ANY company's data without code changes.
  */
 
 import type { ExtractedEntity, ExtractedFact, LLMConfig } from '../types.js';
+import { anthropicMaxOutputTokens, defaultLLMModel, defaultLLMProvider } from '../llm-limits.js';
+import { withLLMTimeout } from '../llm-timeout.js';
 
-const EXTRACTION_SYSTEM_PROMPT = `You are a precise knowledge graph extraction engine. Your job is to extract structured entities and relationships from text.
+/**
+ * Schema context loaded from the database.
+ * Passed to the LLM so it knows what entity/relation types are available.
+ */
+export interface SchemaContext {
+  entityTypes: { id: string; label: string; description?: string }[];
+  relationTypes: {
+    id: string;
+    label: string;
+    sourceTypes?: string[];
+    targetTypes?: string[];
+    description?: string;
+    cardinality?: string;
+    invalidationPolicy?: string;
+  }[];
+}
+
+function buildSystemPrompt(schema?: SchemaContext): string {
+  const hasEntitySchema = Boolean(schema?.entityTypes?.length);
+  const hasRelationSchema = Boolean(schema?.relationTypes?.length);
+  const entityTypeInstruction = hasEntitySchema
+    ? `Use one of: ${schema!.entityTypes.map(t => t.id).join('|')}`
+    : 'Infer a concise lower_snake_case entity type from the source text and metadata.';
+
+  const relationTypeInstruction = hasRelationSchema
+    ? `Use one of: ${schema!.relationTypes.map(t => t.id).join('|')}`
+    : 'Infer a concise lower_snake_case relation type from the source text and metadata.';
+
+  // Build entity type descriptions if available
+  const entityTypeDesc = schema?.entityTypes?.length
+    ? '\n\nAvailable entity types:\n' + schema.entityTypes
+        .map(t => `- ${t.id}: ${t.description || t.label}`)
+        .join('\n')
+    : '';
+
+  // Build relation type descriptions if available
+  const relationTypeDesc = schema?.relationTypes?.length
+    ? '\n\nAvailable relation types:\n' + schema.relationTypes
+        .map(t => {
+          let desc = `- ${t.id}: ${t.description || t.label}`;
+          if (t.sourceTypes?.length) desc += ` (from: ${t.sourceTypes.join(', ')})`;
+          if (t.targetTypes?.length) desc += ` (to: ${t.targetTypes.join(', ')})`;
+          if (t.cardinality && t.cardinality !== 'many') desc += ` (current fact cardinality: ${t.cardinality})`;
+          return desc;
+        })
+        .join('\n')
+    : '';
+
+  return `You are a precise knowledge graph extraction engine. Your job is to extract structured entities and relationships from text and integrate them into an existing knowledge graph.
 
 You must return valid JSON with this exact schema:
 
@@ -21,7 +66,7 @@ You must return valid JSON with this exact schema:
   "entities": [
     {
       "name": "Full proper name",
-      "entityType": "person|company|project|decision|concept|event|document",
+      "entityType": "${entityTypeInstruction}",
       "attributes": {"key": "value"},
       "confidence": 0.0-1.0
     }
@@ -30,27 +75,32 @@ You must return valid JSON with this exact schema:
     {
       "sourceName": "Entity name (must match an entity above)",
       "targetName": "Entity name (must match an entity above)",
-      "relation": "works_at|founded|advises|invested_in|owns|contributes_to|decided|blocked_by|attended|mentions|related_to",
+      "relation": "${relationTypeInstruction}",
       "factText": "Natural language description of this relationship",
+      "evidenceQuote": "Exact quote or compact source phrase supporting this fact",
+      "confidenceReason": "Brief reason for the confidence score",
       "validAt": "ISO date if mentioned, null otherwise",
       "confidence": 0.0-1.0
     }
   ]
-}
+}${entityTypeDesc}${relationTypeDesc}
 
 Rules:
-- Extract ALL entities mentioned — people, companies, projects, products, decisions, events
-- Extract ALL relationships — employment, ownership, decisions, dependencies, mentions
-- Use the FULL proper name (e.g., "Alice Chen" not "Alice")
+- Extract ALL entities mentioned in the text
+- Extract ALL relationships between entities
+- Use the FULL proper name for entities — not abbreviations or first names alone
+- CRITICAL: If existing entities are provided as context, REUSE their exact names instead of creating variants
 - Set confidence based on how explicit the statement is:
-  - 0.95: explicitly stated ("Alice is CTO of Acme")
-  - 0.8: strongly implied ("Alice from Acme" implies works_at)
-  - 0.6: inferred ("they discussed Acme" — who are "they"?)
+  - 0.95: explicitly stated
+  - 0.8: strongly implied
+  - 0.6: inferred from context
 - For temporal info, include ISO dates in validAt
-- Capture decisions as entities (type: "decision") AND as facts (relation: "decided")
-- When someone's role/title is mentioned, create a works_at fact with the role in factText
+- Include a short evidenceQuote copied from the source text for every fact
+- Include confidenceReason for every fact
+- If ontology types are provided, use the closest available type. If no ontology is provided, infer neutral lower_snake_case types without assuming a fixed business domain.
 - Do NOT hallucinate entities or relationships not present in the text
 - Return ONLY the JSON, no markdown fences or explanation`;
+}
 
 export interface LLMExtractionResult {
   entities: ExtractedEntity[];
@@ -66,13 +116,14 @@ export async function extractWithLLM(
   text: string,
   config?: LLMConfig,
   existingContext?: string,
+  schema?: SchemaContext,
 ): Promise<LLMExtractionResult> {
-  const provider = config?.provider || 'anthropic';
+  const provider = defaultLLMProvider(config);
 
   if (provider === 'anthropic') {
-    return extractWithAnthropic(text, config, existingContext);
+    return extractWithAnthropic(text, config, existingContext, schema);
   } else {
-    return extractWithOpenAI(text, config, existingContext);
+    return extractWithOpenAI(text, config, existingContext, schema);
   }
 }
 
@@ -80,20 +131,22 @@ async function extractWithAnthropic(
   text: string,
   config?: LLMConfig,
   existingContext?: string,
+  schema?: SchemaContext,
 ): Promise<LLMExtractionResult> {
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
   const client = new Anthropic({
     apiKey: config?.apiKey || process.env.ANTHROPIC_API_KEY,
   });
 
+  const systemPrompt = buildSystemPrompt(schema);
   const userMessage = buildUserMessage(text, existingContext);
 
-  const response = await client.messages.create({
-    model: config?.model || 'claude-sonnet-4-20250514',
-    max_tokens: 4096,
-    system: EXTRACTION_SYSTEM_PROMPT,
+  const response = await withLLMTimeout(client.messages.create({
+    model: defaultLLMModel('anthropic', config),
+    max_tokens: anthropicMaxOutputTokens(config),
+    system: systemPrompt,
     messages: [{ role: 'user', content: userMessage }],
-  });
+  }), 'extraction anthropic request');
 
   const content = response.content[0];
   if (content.type !== 'text') {
@@ -107,22 +160,24 @@ async function extractWithOpenAI(
   text: string,
   config?: LLMConfig,
   existingContext?: string,
+  schema?: SchemaContext,
 ): Promise<LLMExtractionResult> {
   const OpenAI = (await import('openai')).default;
   const client = new OpenAI({
     apiKey: config?.apiKey || process.env.OPENAI_API_KEY,
   });
 
+  const systemPrompt = buildSystemPrompt(schema);
   const userMessage = buildUserMessage(text, existingContext);
 
-  const response = await client.chat.completions.create({
-    model: config?.model || 'gpt-4o-mini',
+  const response = await withLLMTimeout(client.chat.completions.create({
+    model: defaultLLMModel('openai', config),
     response_format: { type: 'json_object' },
     messages: [
-      { role: 'system', content: EXTRACTION_SYSTEM_PROMPT },
+      { role: 'system', content: systemPrompt },
       { role: 'user', content: userMessage },
     ],
-  });
+  }), 'extraction openai request');
 
   const content = response.choices[0]?.message?.content;
   if (!content) return { entities: [], facts: [] };
@@ -134,7 +189,7 @@ function buildUserMessage(text: string, existingContext?: string): string {
   let msg = '';
 
   if (existingContext) {
-    msg += `EXISTING KNOWLEDGE GRAPH CONTEXT (use this to avoid duplicates and detect changes):\n${existingContext}\n\n`;
+    msg += `${existingContext}\n\n`;
   }
 
   msg += `TEXT TO EXTRACT FROM:\n${text}`;
@@ -160,11 +215,21 @@ function parseExtractionResponse(text: string): LLMExtractionResult {
         targetName: f.targetName || f.target || '',
         relation: f.relation || 'related_to',
         factText: f.factText || f.fact || '',
-        validAt: f.validAt ? new Date(f.validAt) : undefined,
+        validAt: parseOptionalDate(f.validAt),
         confidence: typeof f.confidence === 'number' ? f.confidence : 0.6,
+        evidence: {
+          quote: f.evidenceQuote || f.evidence?.quote || undefined,
+          confidenceReason: f.confidenceReason || f.evidence?.confidenceReason || undefined,
+        },
       })),
     };
   } catch {
     return { entities: [], facts: [] };
   }
+}
+
+function parseOptionalDate(value: unknown): Date | undefined {
+  if (!value) return undefined;
+  const parsed = new Date(String(value));
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
 }

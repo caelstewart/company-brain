@@ -4,20 +4,25 @@
  */
 
 import type { EmbeddingConfig } from './types.js';
+import { withLLMTimeout } from './llm-timeout.js';
 
 const DEFAULT_MODEL = 'text-embedding-3-large';
 const DIMENSIONS = 1536;
+const EMBEDDING_CONTEXT_TOKENS = 8191;
+const EMBEDDING_RESERVED_TOKENS = 256;
+const APPROX_CHARS_PER_TOKEN = 3.5;
+const EMBEDDING_CHUNK_CHARS = Math.floor((EMBEDDING_CONTEXT_TOKENS - EMBEDDING_RESERVED_TOKENS) * APPROX_CHARS_PER_TOKEN);
+const EMBEDDING_CHUNK_OVERLAP_CHARS = Math.floor(256 * APPROX_CHARS_PER_TOKEN);
 
 let openaiClient: any = null;
 
-function getClient(config?: EmbeddingConfig) {
+async function getClient(config?: EmbeddingConfig) {
   if (openaiClient) return openaiClient;
 
   const apiKey = config?.apiKey || process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error('OPENAI_API_KEY required for embeddings');
 
-  // Dynamic import to avoid hard dep when not using embeddings
-  const OpenAI = require('openai').default;
+  const { default: OpenAI } = await import('openai');
   openaiClient = new OpenAI({ apiKey });
   return openaiClient;
 }
@@ -26,44 +31,74 @@ export async function embed(
   text: string,
   config?: EmbeddingConfig,
 ): Promise<number[]> {
-  const client = getClient(config);
-  const model = config?.model || DEFAULT_MODEL;
-
-  const response = await client.embeddings.create({
-    model,
-    input: text.slice(0, 8000), // Token limit safety
-    dimensions: DIMENSIONS,
-  });
-
-  return response.data[0].embedding;
+  const [embedding] = await embedBatch([text], config);
+  return embedding;
 }
 
 export async function embedBatch(
   texts: string[],
   config?: EmbeddingConfig,
 ): Promise<number[][]> {
-  const client = getClient(config);
+  const client = await getClient(config);
   const model = config?.model || DEFAULT_MODEL;
 
-  // OpenAI supports up to 2048 inputs per batch
-  const batches: string[][] = [];
-  for (let i = 0; i < texts.length; i += 2048) {
-    batches.push(texts.slice(i, i + 2048).map(t => t.slice(0, 8000)));
-  }
-
-  const results: number[][] = [];
-  for (const batch of batches) {
-    const response = await client.embeddings.create({
-      model,
-      input: batch,
-      dimensions: DIMENSIONS,
-    });
-    for (const item of response.data) {
-      results.push(item.embedding);
+  const chunkRequests: { text: string; sourceIndex: number; weight: number }[] = [];
+  for (let sourceIndex = 0; sourceIndex < texts.length; sourceIndex += 1) {
+    const chunks = chunkForEmbedding(texts[sourceIndex]);
+    for (const chunk of chunks) {
+      chunkRequests.push({ text: chunk, sourceIndex, weight: Math.max(1, chunk.length) });
     }
   }
 
-  return results;
+  const chunkEmbeddings: { embedding: number[]; sourceIndex: number; weight: number }[] = [];
+  for (let i = 0; i < chunkRequests.length; i += 2048) {
+    const batch = chunkRequests.slice(i, i + 2048);
+    const response = await withLLMTimeout(client.embeddings.create({
+      model,
+      input: batch.map(item => item.text),
+      dimensions: DIMENSIONS,
+    }), 'embedding openai request') as { data: Array<{ embedding: number[] }> };
+    for (let j = 0; j < response.data.length; j += 1) {
+      chunkEmbeddings.push({
+        embedding: response.data[j].embedding,
+        sourceIndex: batch[j].sourceIndex,
+        weight: batch[j].weight,
+      });
+    }
+  }
+
+  return texts.map((_, sourceIndex) => weightedAverage(
+    chunkEmbeddings.filter(item => item.sourceIndex === sourceIndex),
+  ));
+}
+
+function chunkForEmbedding(text: string): string[] {
+  const normalized = text.trim();
+  if (!normalized) return [''];
+  if (normalized.length <= EMBEDDING_CHUNK_CHARS) return [normalized];
+
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < normalized.length) {
+    const end = Math.min(normalized.length, start + EMBEDDING_CHUNK_CHARS);
+    chunks.push(normalized.slice(start, end));
+    if (end >= normalized.length) break;
+    start = end - EMBEDDING_CHUNK_OVERLAP_CHARS;
+  }
+  return chunks;
+}
+
+function weightedAverage(items: { embedding: number[]; weight: number }[]): number[] {
+  if (items.length === 0) return Array.from({ length: DIMENSIONS }, () => 0);
+  const totalWeight = items.reduce((sum, item) => sum + item.weight, 0);
+  const output = Array.from({ length: items[0].embedding.length }, () => 0);
+  for (const item of items) {
+    const weight = item.weight / totalWeight;
+    for (let i = 0; i < item.embedding.length; i += 1) {
+      output[i] += item.embedding[i] * weight;
+    }
+  }
+  return output;
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {

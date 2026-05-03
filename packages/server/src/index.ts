@@ -20,11 +20,39 @@
  *   BRAIN_REST_HOST       - REST API host (default: 127.0.0.1)
  *   BRAIN_SKILLS_DIR      - Directory for user skill files (default: ~/.company-brain/skills)
  *   BRAIN_CONNECTORS_DIR  - Directory for custom connector definitions (default: ~/.company-brain/connectors)
+ *   BRAIN_WEBHOOKS_DIR    - Directory for webhook source configs (default: ~/.company-brain/webhooks)
  */
 
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 import type { BrainConfig } from '@company-brain/core';
 import { startMcpServer } from './mcp.js';
 import { startRestServer } from './rest.js';
+
+// Load .env from project root (company-brain/)
+function loadEnvFile() {
+  const candidates = [
+    resolve(process.cwd(), '.env'),
+    // From packages/server/src → ../../..
+    resolve(process.argv[1] || '', '..', '..', '..', '.env'),
+  ];
+  for (const envPath of candidates) {
+    try {
+      const content = readFileSync(envPath, 'utf-8');
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const eqIdx = trimmed.indexOf('=');
+        if (eqIdx < 0) continue;
+        const key = trimmed.slice(0, eqIdx).trim();
+        const value = trimmed.slice(eqIdx + 1).trim();
+        if (!process.env[key]) process.env[key] = value;
+      }
+      break;
+    } catch {}
+  }
+}
+loadEnvFile();
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '~';
 
@@ -32,7 +60,7 @@ function defaultSkillsDir(): string {
   return `${HOME_DIR}/.company-brain/skills`;
 }
 
-function parseArgs(argv: string[]): { mode: 'mcp' | 'rest' | 'both'; port: number; host: string; skillsDir: string; connectorsDir: string } {
+function parseArgs(argv: string[]): { mode: 'mcp' | 'rest' | 'both'; port: number; host: string; skillsDir: string; connectorsDir: string; webhooksDir: string } {
   const hasMcp = argv.includes('--mcp');
   const hasRest = argv.includes('--rest');
 
@@ -54,7 +82,10 @@ function parseArgs(argv: string[]): { mode: 'mcp' | 'rest' | 'both'; port: numbe
   const connectorsDirIdx = argv.indexOf('--connectors-dir');
   const connectorsDir = connectorsDirIdx >= 0 ? argv[connectorsDirIdx + 1] : process.env.BRAIN_CONNECTORS_DIR || `${HOME_DIR}/.company-brain/connectors`;
 
-  return { mode, port, host, skillsDir, connectorsDir };
+  const webhooksDirIdx = argv.indexOf('--webhooks-dir');
+  const webhooksDir = webhooksDirIdx >= 0 ? argv[webhooksDirIdx + 1] : process.env.BRAIN_WEBHOOKS_DIR || `${HOME_DIR}/.company-brain/webhooks`;
+
+  return { mode, port, host, skillsDir, connectorsDir, webhooksDir };
 }
 
 function buildConfig(): BrainConfig {
@@ -70,21 +101,21 @@ function buildConfig(): BrainConfig {
     embedding: process.env.OPENAI_API_KEY
       ? { provider: 'openai', apiKey: process.env.OPENAI_API_KEY }
       : undefined,
-    llm: process.env.ANTHROPIC_API_KEY
-      ? { provider: 'anthropic', apiKey: process.env.ANTHROPIC_API_KEY }
-      : process.env.OPENAI_API_KEY
-        ? { provider: 'openai', apiKey: process.env.OPENAI_API_KEY }
+    llm: process.env.OPENAI_API_KEY
+      ? { provider: 'openai', apiKey: process.env.OPENAI_API_KEY }
+      : process.env.ANTHROPIC_API_KEY
+        ? { provider: 'anthropic', apiKey: process.env.ANTHROPIC_API_KEY }
         : undefined,
     defaultGroupId: process.env.BRAIN_GROUP_ID || 'default',
   };
 }
 
 async function main() {
-  const { mode, port, host, skillsDir, connectorsDir } = parseArgs(process.argv.slice(2));
+  const { mode, port, host, skillsDir, connectorsDir, webhooksDir } = parseArgs(process.argv.slice(2));
   const config = buildConfig();
 
   if (mode === 'mcp' || mode === 'both') {
-    await startMcpServer(config, { skillsDir, connectorsDir });
+    await startMcpServer(config, { skillsDir, connectorsDir, webhooksDir });
   }
 
   if (mode === 'rest' || mode === 'both') {
@@ -92,7 +123,7 @@ async function main() {
       port,
       host,
       authToken: process.env.BRAIN_AUTH_TOKEN,
-    }, { skillsDir, connectorsDir });
+    }, { skillsDir, connectorsDir, webhooksDir });
   }
 }
 

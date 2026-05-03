@@ -1,6 +1,6 @@
 {
   "name": "@company-brain/server",
-  "version": "0.1.0",
+  "version": "0.1.5",
   "description": "MCP + REST server for Company Brain",
   "type": "module",
   "main": "dist/index.js",

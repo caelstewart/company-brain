@@ -1,15 +1,15 @@
 /**
  * The Fail-Improve Loop.
  *
- * Core insight from gbrain: try deterministic first, fall back to LLM,
- * and LOG every fallback. Over time, analyze the logs to generate better
- * deterministic rules, reducing LLM dependency and cost.
+ * Logs extraction behavior so the system can improve prompts, schemas, evals,
+ * and review policy over time. It does not generate deterministic semantic
+ * regex rules; meaning extraction stays LLM-first.
  *
  * This is what makes the system get smarter over time without manual intervention.
  */
 
 import type postgres from 'postgres';
-import type { ExtractionResult } from '../types.js';
+import type { ExtractionResult, ImprovementProposal } from '../types.js';
 
 export interface FailImproveStats {
   totalExtractions: number;
@@ -46,7 +46,6 @@ export async function logExtraction(
 
 /**
  * Get fail-improve statistics for a group.
- * Shows how the deterministic extraction rate is improving over time.
  */
 export async function getStats(
   db: postgres.Sql,
@@ -70,7 +69,7 @@ export async function getStats(
   const deterministic = Number(stats[0].deterministic);
   const llm = Number(stats[0].llm);
 
-  // Find common patterns in LLM-only extractions (these are improvement opportunities)
+  // Find common input clusters in LLM-only extractions (these are improvement opportunities).
   const missPatterns = await db`
     SELECT
       SUBSTRING(input_preview FROM 1 FOR 100) AS pattern,
@@ -97,19 +96,13 @@ export async function getStats(
 }
 
 /**
- * Analyze LLM extraction logs and suggest new deterministic patterns.
- *
- * Looks for recurring patterns in LLM-successful extractions and
- * generates regex patterns that could handle them deterministically.
- *
- * Returns suggested patterns that a developer can review and approve.
+ * Analyze LLM extraction logs and suggest prompt/schema/eval improvements.
  */
 export async function suggestPatterns(
   db: postgres.Sql,
   groupId: string,
   minOccurrences: number = 3,
-): Promise<Array<{ entityType: string; suggestedPattern: string; examples: string[]; occurrences: number }>> {
-  // Find entity types that are consistently extracted by LLM
+): Promise<Array<{ entityType: string; suggestedImprovement: string; examples: string[]; occurrences: number }>> {
   const llmExtractions = await db`
     SELECT entities_extracted, input_preview
     FROM extraction_log
@@ -120,50 +113,109 @@ export async function suggestPatterns(
     LIMIT 500
   `;
 
-  // Group by entity type and look for common surrounding text patterns
-  const typePatterns = new Map<string, Map<string, string[]>>();
+  const byType = new Map<string, string[]>();
 
   for (const row of llmExtractions) {
     const entities = row.entities_extracted as any[];
     for (const entity of entities) {
       if (!entity.name || !entity.entityType) continue;
-
       const type = entity.entityType;
-      if (!typePatterns.has(type)) typePatterns.set(type, new Map());
-
-      // Find the surrounding context of the entity mention in the input
-      const input = row.input_preview as string;
-      const idx = input.toLowerCase().indexOf(entity.name.toLowerCase());
-      if (idx >= 0) {
-        const before = input.slice(Math.max(0, idx - 30), idx).trim();
-        const after = input.slice(idx + entity.name.length, idx + entity.name.length + 30).trim();
-        const contextKey = `${before.slice(-15)}___${after.slice(0, 15)}`;
-
-        const map = typePatterns.get(type)!;
-        if (!map.has(contextKey)) map.set(contextKey, []);
-        map.get(contextKey)!.push(entity.name);
-      }
+      if (!byType.has(type)) byType.set(type, []);
+      byType.get(type)!.push(String(row.input_preview || '').slice(0, 300));
     }
   }
 
-  // Filter to patterns with enough occurrences
-  const suggestions: Array<{ entityType: string; suggestedPattern: string; examples: string[]; occurrences: number }> = [];
-
-  for (const [entityType, patterns] of typePatterns) {
-    for (const [context, examples] of patterns) {
-      if (examples.length >= minOccurrences) {
-        const [before, after] = context.split('___');
-        const escapedBefore = before.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const escapedAfter = after.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        suggestions.push({
-          entityType,
-          suggestedPattern: `/${escapedBefore}([A-Z][a-zA-Z\\s]+)${escapedAfter}/g`,
-          examples: examples.slice(0, 5),
-          occurrences: examples.length,
-        });
-      }
+  const suggestions: Array<{ entityType: string; suggestedImprovement: string; examples: string[]; occurrences: number }> = [];
+  for (const [entityType, examples] of byType) {
+    if (examples.length >= minOccurrences) {
+      suggestions.push({
+        entityType,
+        suggestedImprovement: `Review ontology description, examples, and eval coverage for entity type "${entityType}".`,
+        examples: examples.slice(0, 5),
+        occurrences: examples.length,
+      });
     }
   }
 
   return suggestions.sort((a, b) => b.occurrences - a.occurrences);
+}
+
+/**
+ * Generate audited improvement proposals from extraction logs and review queue
+ * signals. These are suggestions only; callers should route them through human
+ * or agent review before changing schemas or skills.
+ */
+export async function proposeImprovements(
+  db: postgres.Sql,
+  groupId: string,
+): Promise<ImprovementProposal[]> {
+  const proposals: ImprovementProposal[] = [];
+
+  const [patterns, reviewCounts] = await Promise.all([
+    suggestPatterns(db, groupId, 3).catch(() => []),
+    db`
+      SELECT review_type, payload->>'reason' AS reason, COUNT(*) AS cnt
+      FROM graph_review_queue
+      WHERE group_id = ${groupId}
+        AND status = 'pending'
+      GROUP BY review_type, payload->>'reason'
+      ORDER BY cnt DESC
+      LIMIT 20
+    `.catch(() => []),
+  ]);
+
+  for (const pattern of patterns.slice(0, 10)) {
+    proposals.push({
+      id: `extraction-improvement:${pattern.entityType}`,
+      kind: 'extraction',
+      title: `Improve extraction guidance for ${pattern.entityType}`,
+      rationale: `The LLM repeatedly extracted ${pattern.entityType} entities; improve schema descriptions, prompt examples, or eval coverage rather than adding regex rules.`,
+      confidence: Math.min(0.9, 0.5 + pattern.occurrences / 20),
+      evidence: {
+        examples: pattern.examples,
+        occurrences: pattern.occurrences,
+      },
+      proposedAction: {
+        type: 'review_extraction_guidance',
+        entityType: pattern.entityType,
+        suggestion: pattern.suggestedImprovement,
+      },
+    });
+  }
+
+  for (const row of reviewCounts) {
+    const count = Number(row.cnt);
+    const reason = row.reason || 'unknown';
+    const reviewType = row.review_type;
+
+    if (reviewType === 'entity_resolution') {
+      proposals.push({
+        id: `canonicalization:${reason}`,
+        kind: 'canonicalization',
+        title: 'Review ambiguous entity canonicalization rules',
+        rationale: `${count} pending entity resolution review item(s) share reason "${reason}".`,
+        confidence: Math.min(0.85, 0.45 + count / 20),
+        evidence: { reason, count },
+        proposedAction: {
+          type: 'review_entity_resolution_thresholds',
+          reason,
+        },
+      });
+    } else if (reviewType === 'fact_resolution') {
+      proposals.push({
+        id: `schema:${reason}`,
+        kind: 'schema',
+        title: 'Review schema coverage for unresolved facts',
+        rationale: `${count} pending fact resolution review item(s) indicate extraction produced facts that could not be grounded.`,
+        confidence: Math.min(0.85, 0.45 + count / 20),
+        evidence: { reason, count },
+        proposedAction: {
+          type: 'review_schema_or_aliases',
+          reason,
+        },
+      });
+    }
+  }
+
+  return proposals.sort((a, b) => b.confidence - a.confidence);
 }

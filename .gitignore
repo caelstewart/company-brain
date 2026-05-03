@@ -5,4 +5,5 @@ dist/
 *.log
 .turbo/
 .DS_Store
-package-lock.json
+package-lock *.json
+graph.html

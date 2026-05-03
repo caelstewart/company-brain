@@ -47,6 +47,16 @@ export class MyServiceConnector extends AbstractConnector<MyConfig> {
       sourceType: 'my_service',
       sourceId: `myservice://${item.id}`,
       validAt: new Date(item.createdAt),
+      visibility: {
+        allowedGroups: item.visibleGroupIds || [],
+        allowedPrincipals: item.visibleUserIds || [],
+        sourceSystem: 'my_service',
+        inheritedFrom: item.containerId,
+      },
+      metadata: {
+        provider: 'my_service',
+        rawAcl: item.acl,
+      },
     }));
   }
 }
@@ -140,10 +150,13 @@ An `EpisodeInput` has:
 | `validAt` | no | When this data was created/modified. Defaults to now. |
 | `groupId` | no | Workspace override. Falls back to the connector config's groupId. |
 | `metadata` | no | Arbitrary JSON stored with the episode for provenance. |
+| `visibility` | no | Source-native ACLs/visibility. Pass allowed/denied groups or principals here instead of relying on labels inside the text. |
+
+Permissions should come from the source system's metadata, not from words in the content. For example, a Slack channel membership list, ticket visibility field, Drive permissions response, or CRM team ACL should be mapped into `visibility.allowedGroups`, `visibility.allowedPrincipals`, `visibility.deniedGroups`, and `visibility.deniedPrincipals`.
 
 ### `handleWebhook(payload, headers?)` (optional)
 
-If your source supports push notifications (Slack Events API, Notion webhooks, etc.), implement this to convert incoming payloads into episodes.
+If your source supports push notifications, implement this to convert incoming payloads into episodes.
 
 ```typescript
 async handleWebhook(payload: unknown, headers?: Record<string, string>): Promise<EpisodeInput[]> {

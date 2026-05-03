@@ -1,6 +1,6 @@
 {
   "name": "@company-brain/core",
-  "version": "0.1.0",
+  "version": "0.1.5",
   "description": "Temporal knowledge graph engine with hybrid extraction and search",
   "type": "module",
   "main": "dist/index.js",
@@ -11,11 +11,14 @@
     "./extraction": "./dist/extraction/index.js",
     "./search": "./dist/search/index.js",
     "./graph": "./dist/graph/index.js",
+    "./answer": "./dist/answer/index.js",
+    "./memory": "./dist/memory/index.js",
+    "./eval": "./dist/eval/index.js",
     "./skills": "./dist/skills/index.js",
     "./connectors": "./dist/connectors/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/schema.sql dist/schema.sql",
     "test": "vitest run",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit"

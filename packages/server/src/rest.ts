@@ -11,13 +11,17 @@ import {
   Brain,
   ConnectorRegistry,
   FilesystemConnector,
-  SlackConnector,
-  NotionConnector,
   NangoConnector,
   SkillResolver,
+  WebhookReceiver,
+  baselineEvalFixtures,
+  allEvalFixtures,
+  runTriageEvalSuite,
+  summarizeTriageEvalResults,
   loadConnectorsFromDir,
+  getDb,
 } from '@company-brain/core';
-import type { BrainConfig } from '@company-brain/core';
+import type { AccessContext, BrainConfig, VisibilityPolicy, WebhookSource } from '@company-brain/core';
 
 interface RestConfig {
   port: number;
@@ -27,15 +31,13 @@ interface RestConfig {
 
 type RouteHandler = (body: any, params: URLSearchParams, rawBody?: string, headers?: Record<string, string>) => Promise<unknown>;
 
-export async function startRestServer(brainConfig: BrainConfig, restConfig: RestConfig, options?: { skillsDir?: string; connectorsDir?: string }): Promise<void> {
+export async function startRestServer(brainConfig: BrainConfig, restConfig: RestConfig, options?: { skillsDir?: string; connectorsDir?: string; webhooksDir?: string }): Promise<void> {
   const brain = new Brain(brainConfig);
   await brain.init();
 
   // Set up connector registry with built-in connectors
   const registry = new ConnectorRegistry(brain);
   registry.register(new FilesystemConnector());
-  registry.register(new SlackConnector());
-  registry.register(new NotionConnector());
   registry.register(new NangoConnector());
 
   // Load user-defined connectors from directory
@@ -47,6 +49,12 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
       console.log(`[connectors] Loaded custom connector: ${c.id} (${c.name})`);
     }
   }
+
+  // Set up webhook receiver
+  const webhooksDir = options?.webhooksDir || process.env.BRAIN_WEBHOOKS_DIR || `${process.env.HOME || '~'}/.company-brain/webhooks`;
+  const webhookReceiver = new WebhookReceiver(brain, { webhooksDir });
+  const webhookSourcesLoaded = await webhookReceiver.loadSources();
+  if (webhookSourcesLoaded > 0) console.log(`[webhooks] Loaded ${webhookSourcesLoaded} webhook source(s) from ${webhooksDir}`);
 
   // Set up skill resolver with user skills
   const skillsDir = options?.skillsDir || process.env.BRAIN_SKILLS_DIR;
@@ -67,6 +75,7 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
       sourceId: body.sourceId,
       validAt: body.validAt ? new Date(body.validAt) : undefined,
       metadata: body.metadata,
+      visibility: body.visibility as VisibilityPolicy | undefined,
       groupId: body.groupId,
     });
   });
@@ -82,6 +91,51 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
       relations: body.relations,
       methods: body.methods,
       minConfidence: body.minConfidence,
+      access: body.access as AccessContext | undefined,
+    });
+  });
+
+  routes.set('POST /api/answer', async (body) => {
+    return brain.answer({
+      query: body.query,
+      groupId: body.groupId,
+      limit: body.limit,
+      offset: body.offset,
+      asOf: body.asOf ? new Date(body.asOf) : undefined,
+      entityTypes: body.entityTypes,
+      relations: body.relations,
+      methods: body.methods,
+      minConfidence: body.minConfidence,
+      access: body.access as AccessContext | undefined,
+    });
+  });
+
+  routes.set('POST /api/memory/search', async (body) => {
+    return brain.searchMemory({
+      query: body.query,
+      groupId: body.groupId,
+      limit: body.limit,
+      kinds: body.kinds,
+      statuses: body.statuses,
+      access: body.access as AccessContext | undefined,
+    });
+  });
+
+  routes.set('POST /api/memory/list', async (body) => {
+    return brain.listMemory({
+      groupId: body.groupId,
+      limit: body.limit,
+      kinds: body.kinds,
+      statuses: body.statuses,
+      access: body.access as AccessContext | undefined,
+    });
+  });
+
+  routes.set('POST /api/cleanup/ephemeral', async (body) => {
+    return brain.cleanupEphemeralEpisodes({
+      groupId: body.groupId,
+      olderThanDays: body.olderThanDays,
+      limit: body.limit,
     });
   });
 
@@ -92,7 +146,7 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
     const includeTimeline = params.get('includeTimeline') === 'true';
     const depth = params.get('depth') ? Number(params.get('depth')) : undefined;
 
-    const result = await brain.getEntity(id, { includeFacts, includeRelated, includeTimeline, depth });
+    const result = await brain.getEntity(id, { includeFacts, includeRelated, includeTimeline, depth, access: accessFromParams(params) });
     if (!result) throw new HttpError(404, 'Entity not found');
     return result;
   });
@@ -101,7 +155,7 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
     const name = decodeURIComponent(params.get('name')!);
     const groupId = params.get('groupId') || undefined;
 
-    const entity = await brain.findEntity(name, groupId);
+    const entity = await brain.findEntity(name, groupId, accessFromParams(params));
     if (!entity) throw new HttpError(404, 'Entity not found');
     return entity;
   });
@@ -113,7 +167,7 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
     const includeInvalidated = params.get('includeInvalidated') === 'true';
     const asOf = params.get('asOf') ? new Date(params.get('asOf')!) : undefined;
 
-    return brain.getFacts(sourceId, targetId, { relation, includeInvalidated, asOf });
+    return brain.getFacts(sourceId, targetId, { relation, includeInvalidated, asOf, access: accessFromParams(params) });
   });
 
   routes.set('POST /api/schema', async (body) => {
@@ -131,8 +185,64 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
     return brain.getSuggestedPatterns(min);
   });
 
+  routes.set('GET /api/improvement-proposals', async () => {
+    return brain.getImprovementProposals();
+  });
+
+  routes.set('POST /api/canonical-clusters', async (body) => {
+    return brain.proposeCanonicalClusters({
+      groupId: body.groupId,
+      minConfidence: body.minConfidence,
+      limit: body.limit,
+      autoApplyThreshold: body.autoApplyThreshold,
+      ambiguousThreshold: body.ambiguousThreshold,
+    });
+  });
+
+  routes.set('POST /api/skills/promote', async (body) => {
+    return brain.promoteSkills({
+      skillsDir: body.skillsDir,
+      minConfidence: body.minConfidence,
+      autoPromote: body.autoPromote,
+    });
+  });
+
+  routes.set('POST /api/evals/run', async (body) => {
+    const fixtures = body.fixtures || (body.includePressure ? allEvalFixtures : baselineEvalFixtures);
+    return brain.runEvals(fixtures, {
+      groupPrefix: body.groupPrefix,
+    });
+  });
+
+  routes.set('POST /api/evals/triage', async () => {
+    const results = await runTriageEvalSuite({
+      llmConfig: brainConfig.llm,
+      triageConfig: brainConfig.triage,
+    });
+    return { summary: summarizeTriageEvalResults(results), results };
+  });
+
+  routes.set('POST /api/permissions/simulate', async (body) => {
+    return brain.simulatePermission(body.visibility, body.access);
+  });
+
+  routes.set('GET /api/graph', async (_body, params) => {
+    const groupId = params.get('groupId') || 'default';
+    const db = getDb();
+    const nodes = await db`
+      SELECT id, name, entity_type AS type, COALESCE(summary, '') AS summary
+      FROM entities WHERE group_id = ${groupId}
+    `;
+    const links = await db`
+      SELECT source_entity_id AS source, target_entity_id AS target,
+             relation, fact_text AS text, confidence
+      FROM facts WHERE group_id = ${groupId} AND invalid_at IS NULL
+    `;
+    return { nodes, links };
+  });
+
   routes.set('GET /api/health', async () => {
-    return { status: 'ok', version: '0.1.0' };
+    return { status: 'ok', version: '0.1.5' };
   });
 
   // ─── Connector Routes ─────────────────────────────────────
@@ -211,6 +321,54 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
     }
   });
 
+  // ─── Webhook Receiver Routes ─────────────────────────────────
+
+  routes.set('GET /api/webhook-sources', async () => {
+    return { sources: webhookReceiver.listSources() };
+  });
+
+  routes.set('POST /api/webhook-sources', async (body) => {
+    if (!body.id || !body.sourceType) {
+      throw new HttpError(400, 'Required fields: id, sourceType');
+    }
+    const source: WebhookSource = {
+      id: body.id,
+      name: body.name || body.id,
+      sourceType: body.sourceType,
+      contentTemplate: body.contentTemplate,
+      sourceIdTemplate: body.sourceIdTemplate,
+      dateField: body.dateField,
+      secret: body.secret,
+      signatureHeader: body.signatureHeader,
+      signatureAlgorithm: body.signatureAlgorithm,
+      signaturePrefix: body.signaturePrefix,
+      eventTypeHeader: body.eventTypeHeader,
+      allowedEvents: body.allowedEvents,
+      metadataFields: body.metadataFields,
+      groupId: body.groupId,
+    };
+    const filepath = await webhookReceiver.saveSource(source);
+    return { ok: true, id: source.id, filepath, webhookUrl: `/api/webhooks/receive/${source.id}` };
+  });
+
+  routes.set('DELETE /api/webhook-sources/:id', async (_body, params) => {
+    const id = params.get('id')!;
+    webhookReceiver.removeSource(id);
+    return { ok: true, id };
+  });
+
+  // Generic webhook receiver — routes to registered webhook sources
+  routes.set('POST /api/webhooks/receive/:id', async (body, params, rawBody, headers) => {
+    const id = params.get('id')!;
+    return webhookReceiver.handle(id, body, rawBody || '', headers || {});
+  });
+
+  // Raw/open ingest endpoint — no source config needed
+  routes.set('POST /api/webhooks/ingest', async (body) => {
+    return webhookReceiver.ingestRaw(body);
+  });
+
+  // Legacy connector-based webhooks (Slack, etc.)
   routes.set('POST /api/webhooks/:type', async (body, _params, rawBody, headers) => {
     const type = _params.get('type')!;
     return registry.handleWebhook(type, body, headers);
@@ -221,7 +379,7 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     // CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
     if (req.method === 'OPTIONS') {
@@ -230,7 +388,7 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
       return;
     }
 
-    // Webhook endpoints skip auth (they use their own signature verification)
+    // Webhook receive/ingest endpoints skip bearer auth (they use their own signature verification)
     const isWebhook = req.url?.startsWith('/api/webhooks/');
 
     // Auth check for non-webhook routes
@@ -244,7 +402,7 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
 
     try {
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
-      const { rawBody, parsed } = req.method === 'POST' ? await readBody(req) : { rawBody: '', parsed: {} };
+      const { rawBody, parsed } = (req.method === 'POST' || req.method === 'DELETE') ? await readBody(req) : { rawBody: '', parsed: {} };
 
       // Collect headers for webhook signature verification
       const headers: Record<string, string> = {};
@@ -275,7 +433,9 @@ export async function startRestServer(brainConfig: BrainConfig, restConfig: Rest
     console.log(`Endpoints:`);
     console.log(`  Brain:      POST /api/ingest, POST /api/search, GET /api/entities/:id`);
     console.log(`  Connectors: POST /api/connectors, POST /api/connectors/:id/sync`);
-    console.log(`  Webhooks:   POST /api/webhooks/:type`);
+    console.log(`  Webhooks:   POST /api/webhooks/receive/:source, POST /api/webhooks/ingest`);
+    console.log(`  Sources:    GET /api/webhook-sources, POST /api/webhook-sources`);
+    console.log(`  Legacy:     POST /api/webhooks/:type (connector-based)`);
     console.log(`  Health:     GET /api/health`);
   });
 }
@@ -286,6 +446,14 @@ class HttpError extends Error {
   constructor(public status: number, message: string) {
     super(message);
   }
+}
+
+function accessFromParams(params: URLSearchParams): AccessContext | undefined {
+  const principalId = params.get('principalId') || undefined;
+  const groups = params.get('groups')?.split(',').filter(Boolean);
+  const roles = params.get('roles')?.split(',').filter(Boolean);
+  if (!principalId && !groups?.length && !roles?.length) return undefined;
+  return { principalId, groups, roles };
 }
 
 function sendJson(res: ServerResponse, status: number, data: unknown): void {

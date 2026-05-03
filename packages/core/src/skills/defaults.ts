@@ -121,6 +121,8 @@ Search the knowledge graph and synthesize results into a clear answer.
    - Lead with the most confident, most recent facts
    - Note any contradictions or timeline changes
    - Flag low-confidence information
+   - Separate directly supported facts from inference
+   - Cite evidence quotes when search results include them
 
 ## Search Strategy
 - Start broad: \`search({ query, methods: ['semantic', 'keyword', 'graph'] })\`
@@ -129,11 +131,18 @@ Search the knowledge graph and synthesize results into a clear answer.
 - For temporal queries: always set \`asOf\`
 
 ## Output Format
-Present results as a structured summary:
-- Entity overview (type, key attributes)
-- Current facts (active, high-confidence)
-- Recent changes (if any facts were recently invalidated)
-- Related entities (1-hop connections)
+Present results as a structured, evidence-grounded summary:
+- Answer: concise direct answer from retrieved facts only
+- Evidence: cite supporting fact text or evidence quotes, with confidence when available
+- Inference: only include interpretation that is logically implied by retrieved evidence, labeled as inference
+- Uncertain or missing: say what is low-confidence, contradicted, or not present in the brain
+
+## Grounding Rules
+- Do NOT add plausible details that are not present in retrieved results.
+- Do NOT state incident status, root cause, owner, timing, or next step unless a retrieved fact explicitly supports it.
+- If the answer requires interpretation, label it: "Inference:".
+- If search results include \`metadata.evidence.quote\`, prefer quoting that over paraphrase.
+- If confidence is below 0.8 or the source text used hedging ("maybe", "sounds like", "likely"), caveat it.
 `,
   },
 
@@ -306,37 +315,37 @@ March 22, 2024:
   {
     id: 'extraction-review',
     name: 'Review Extraction',
-    description: 'Review extraction stats and suggested pattern improvements.',
+    description: 'Review extraction stats and suggested prompt/schema improvements.',
     triggers: [
       'extraction stats',
       'how is extraction',
-      'pattern suggestions',
+      'extraction suggestions',
       'improve extraction',
-      'deterministic rate',
+      'extraction quality',
       'llm usage',
     ],
     priority: 50,
     content: `# Review Extraction
 
 ## Purpose
-Review the fail-improve loop statistics and act on suggested patterns.
+Review the fail-improve loop statistics and act on suggested prompt, schema, and eval improvements.
 
 ## Protocol
 
 1. Get stats: \`brain.getExtractionStats()\`
 2. Present key metrics:
-   - Deterministic hit rate (higher = better, cheaper)
+   - LLM extraction count
    - Total extractions
-   - LLM fallback count
-3. Get pattern suggestions: \`brain.getSuggestedPatterns()\`
+   - Hybrid structural identifier count
+3. Get extraction guidance suggestions: \`brain.getSuggestedPatterns()\`
 4. For each suggestion, evaluate:
-   - Does this pattern make sense?
-   - Would it produce false positives?
-   - Is the occurrence count high enough to justify?
+   - Should the ontology description change?
+   - Should the extraction prompt include a better generic instruction?
+   - Should an eval case be added?
 
 ## Goal
-The deterministic rate should increase over time as patterns are added.
-A healthy system is >70% deterministic after a few hundred extractions.
+Extraction quality should improve without adding brittle semantic regex.
+A healthy system has grounded extractions with clear evidence, low duplicate drift, and improving eval coverage.
 `,
   },
 ];

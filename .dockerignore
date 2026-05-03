@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.turbo/
+
+.env
+.env.*
+*.log
+.DS_Store
+
+graph.html
+package-lock *.json
+
+.git/
+.github/

@@ -43,13 +43,18 @@ export async function disconnect(): Promise<void> {
 }
 
 export async function initSchema(db: postgres.Sql): Promise<void> {
-  const { readFileSync } = await import('fs');
+  const { readFileSync, existsSync } = await import('fs');
   const { join, dirname } = await import('path');
   const { fileURLToPath } = await import('url');
 
   const __dirname = dirname(fileURLToPath(import.meta.url));
-  const schemaPath = join(__dirname, 'schema.sql');
-  const schemaSql = readFileSync(schemaPath, 'utf-8');
+  let schemaPath = join(__dirname, 'schema.sql');
 
+  // When running via tsx from dist/, schema.sql lives in src/ instead
+  if (!existsSync(schemaPath)) {
+    schemaPath = join(__dirname, '..', 'src', 'schema.sql');
+  }
+
+  const schemaSql = readFileSync(schemaPath, 'utf-8');
   await db.unsafe(schemaSql);
 }

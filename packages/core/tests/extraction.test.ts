@@ -31,22 +31,10 @@ describe('extractEntitiesDeterministic', () => {
     expect(mention!.attributes?.handle).toBe('@jsmith');
   });
 
-  it('extracts role+company patterns (Person, Role at Company)', () => {
+  it('does not infer role/company entities from content-only patterns', () => {
     const text = 'Alice Chen, CEO of Acme Corp talked about growth.';
     const entities = extractEntitiesDeterministic(text);
-    // The second ROLE_PATTERN matches "Person, Role of Company"
-    // Check that at least the company was extracted (pattern match group depends on regex)
-    const hasAcme = entities.some(e => e.name.includes('Acme'));
-    const hasAlice = entities.some(e => e.name.includes('Alice'));
-    expect(hasAcme || hasAlice).toBe(true);
-    // Also verify via fact extraction which uses its own regex
-    const facts = extractFactsDeterministic(text, entities);
-    const worksAt = facts.find(f => f.relation === 'works_at' || f.relation === 'founded');
-    // The fact extractor should find this pattern
-    if (worksAt) {
-      expect(worksAt.sourceName).toContain('Alice');
-      expect(worksAt.targetName).toContain('Acme');
-    }
+    expect(entities.length).toBe(0);
   });
 
   it('matches known entities from context with high confidence', () => {
@@ -72,29 +60,13 @@ describe('extractEntitiesDeterministic', () => {
         ['Alice Chen', { id: 'uuid-1', type: 'person' }],
       ]),
     };
-    // Alice appears in known entities AND could match role pattern
+    // Alice appears in known entities; content-only role inference is left to the LLM.
     const text = 'Alice Chen, VP of TechCo presented the roadmap.';
     const entities = extractEntitiesDeterministic(text, context);
     const alices = entities.filter(e => e.name.toLowerCase().includes('alice'));
     // Should only appear once (known entity match takes priority)
     expect(alices.length).toBe(1);
     expect(alices[0].confidence).toBe(0.95);
-  });
-
-  it('applies custom extraction hints', () => {
-    const context: DeterministicContext = {
-      hints: {
-        product: {
-          patterns: [/\b(Brain\s*(?:OS|Engine|API))\b/gi],
-        },
-      },
-    };
-    const text = 'We should integrate Brain Engine into the pipeline.';
-    const entities = extractEntitiesDeterministic(text, context);
-    const product = entities.find(e => e.entityType === 'product');
-    expect(product).toBeDefined();
-    expect(product!.name).toBe('Brain Engine');
-    expect(product!.confidence).toBe(0.75);
   });
 
   it('handles text with no extractable entities', () => {
@@ -113,33 +85,28 @@ describe('extractEntitiesDeterministic', () => {
 // ─── Fact Extraction ────────────────────────────────────────
 
 describe('extractFactsDeterministic', () => {
-  it('extracts works_at facts from role patterns', () => {
+  it('does not extract works_at facts from role patterns', () => {
     const text = 'Alice Chen, VP of Acme Corp';
     const entities = extractEntitiesDeterministic(text);
     const facts = extractFactsDeterministic(text, entities);
     const worksAt = facts.find(f => f.relation === 'works_at');
-    expect(worksAt).toBeDefined();
-    expect(worksAt!.sourceName).toBe('Alice Chen');
-    expect(worksAt!.targetName).toBe('Acme Corp');
+    expect(worksAt).toBeUndefined();
   });
 
-  it('extracts founded facts from founder patterns', () => {
+  it('does not extract founded facts from founder patterns', () => {
     const text = 'Bob Zhang, Co-founder of TechStartup';
     const entities = extractEntitiesDeterministic(text);
     const facts = extractFactsDeterministic(text, entities);
     const founded = facts.find(f => f.relation === 'founded');
-    expect(founded).toBeDefined();
-    expect(founded!.sourceName).toBe('Bob Zhang');
-    expect(founded!.targetName).toBe('TechStartup');
+    expect(founded).toBeUndefined();
   });
 
-  it('extracts decisions', () => {
+  it('does not extract decisions without LLM context', () => {
     const text = 'We decided to offer a 20% discount for Q1 commitments.';
     const entities = extractEntitiesDeterministic(text);
     const facts = extractFactsDeterministic(text, entities);
     const decision = facts.find(f => f.relation === 'decided');
-    expect(decision).toBeDefined();
-    expect(decision!.factText).toContain('20% discount');
+    expect(decision).toBeUndefined();
   });
 
   it('returns empty for text with no relationships', () => {
@@ -154,7 +121,7 @@ describe('extractFactsDeterministic', () => {
 
 describe('assessExtractionConfidence', () => {
   it('returns high confidence for short text with entities', () => {
-    const text = 'Alice Chen, CEO of Acme Corp.';
+    const text = 'Contact alice.chen@acme.com.';
     const entities = extractEntitiesDeterministic(text);
     const facts = extractFactsDeterministic(text, entities);
     const confidence = assessExtractionConfidence(text, entities, facts);

@@ -2,9 +2,13 @@
 
 **Open-source temporal knowledge graph engine for AI agents and knowledge workers.**
 
-Company Brain turns unstructured text into a searchable, temporal knowledge graph. Feed it meeting transcripts, Slack messages, Notion pages, CRM notes, design files, Linear tickets, emails, call recordings, or anything else your team produces. It extracts entities and relationships, wires them into a graph, detects contradictions over time, and makes everything searchable through hybrid retrieval.
+Company Brain turns messy company interactions and documents into a searchable, temporal knowledge graph and organizational memory layer. Feed it meeting transcripts, Slack messages, Notion pages, CRM notes, design files, Linear tickets, emails, call recordings, or anything else your team produces. It extracts entities, relationships, decisions, commitments, risks, policies, and workflow knowledge, keeps provenance and permissions attached, and answers questions with grounded citations.
 
-Built by studying what works and what doesn't in three systems: [gbrain](https://github.com/garrytan/gbrain) (deterministic extraction, skill-based agents), [Graphiti/Zep](https://github.com/getzep/graphiti) (temporal fact model, contradiction detection), and [Supermemory](https://github.com/supermemoryai/supermemory) (simple API, profile synthesis). Company Brain takes the best architectural decisions from each and combines them into a single Postgres-native engine.
+Built by studying what works and what doesn't in systems like [gbrain](https://github.com/garrytan/gbrain) (skill-based agents), [Graphiti/Zep](https://github.com/getzep/graphiti) (temporal fact model, contradiction detection), GraphRAG-style retrieval systems, and modern memory products. Company Brain combines those ideas into a single Postgres-native engine.
+
+## Status
+
+Company Brain is ready to share publicly as an advanced open-source alpha / research prototype. It has real ingestion, triage, extraction, retrieval, permissions, grounded answer synthesis, evals, and pressure suites. It is not yet "enterprise production ready" in the sense of hardened auth, hosted deployment, migrations, SOC2 controls, observability dashboards, disaster recovery, and long-running customer-scale soak tests.
 
 ## The Problem
 
@@ -16,46 +20,54 @@ Building an enterprise brain means solving four problems at once.
 
 Your data lives in Slack, Notion, HubSpot, Figma, Linear, Granola, Google Docs, email, and whatever else your team adopted last quarter. None of these systems talk to each other.
 
-**Status: solved.** The connector framework normalizes any source into timestamped episodes. Built-in connectors handle Slack, Notion, and the filesystem. The Nango connector gives access to 700+ APIs without writing code. For anything else, drop a JSON config file in `~/.company-brain/connectors/` to define a new REST API connector with no code. Incremental sync is native.
+**Status: implemented.** The connector framework normalizes any source into timestamped episodes. Built-in connectors handle the filesystem, Nango-backed integrations, configurable REST APIs, and generic webhooks. Nango gives access to 700+ APIs without maintaining provider-specific connector code in this repo. For anything else, drop a JSON config file in `~/.company-brain/connectors/` to define a new REST API connector with no code. Incremental sync is native.
 
 ### 2. Unstructured
 
 Raw transcripts, documents, and messages need to become structured knowledge: who, what, when, and how things relate. The brain has to self-organize into a schema that works for your specific business.
 
-**Status: solved.** LLM-first extraction reads raw text and outputs typed entities, relationships, temporal metadata, and confidence scores. The schema is configurable per workspace with custom entity types and relation types. Entity resolution (trigram similarity + alias table) deduplicates the same person or company across sources automatically.
+**Status: implemented.** LLM-first extraction reads raw text and outputs typed entities, relationships, temporal metadata, and confidence scores. The schema is configurable per workspace with custom entity types and relation types. Entity resolution combines alias matching, trigram similarity, embeddings, and graph-level canonicalization proposals.
 
 ### 3. Unverifiable
 
 Code either passes the test or it doesn't. Knowledge work is subjective. There is no unit test for "is this a good insight?"
 
-**Status: partial.** Every fact has a confidence score, traces back to its source text, and carries temporal history so you can see what changed and when. Extraction logging tracks every operation for human review. What is missing: user feedback loops where a human corrects an extraction and the system learns from it. This is an open problem.
+**Status: implemented with ongoing eval expansion.** Every fact and memory object has confidence, evidence, extractor metadata, source episode provenance, visibility policy, and temporal history so you can see what changed and when. Extraction logging, improvement proposals, answer traces, active canonicalization policy, DB-backed eval fixtures, pressure suites, and permission simulation provide a testable feedback loop. What remains is adding larger customer-specific gold datasets and long-running production telemetry.
 
 ### 4. Compaction
 
 As the corpus grows, so does noise. Without cleanup, you end up searching for needles in a haystack of stale, redundant, or low-value facts.
 
-**Status: partial.** Temporal invalidation replaces stale facts (VP becomes CRO, old fact gets marked superseded). Queries return only current facts by default. Entity resolution prevents duplicate nodes. Recency boost in search favors recent information. What is missing: automatic summary condensation, relevance decay for unreferenced facts, and corpus-wide cleanup jobs.
+**Status: partially implemented.** LLM triage drops low-value noise, keeps ephemeral interactions with TTLs, and promotes durable operating knowledge. Temporal invalidation replaces stale facts (VP becomes CRO, old fact gets marked superseded). Queries return only current facts by default. Entity resolution prevents duplicate nodes, graph-level canonical clustering proposes entity/relation merges for review, and recency boost favors recent information. What remains is production-scale compaction, automatic summary condensation, and relevance decay for unreferenced facts.
 
 ## Quick Start
 
+For a copy-pasteable local demo path, see [`QUICKSTART.md`](QUICKSTART.md).
+
 ```bash
-# 1. Start Postgres with pgvector
-docker compose up -d
+# 1. Start local Postgres with pgvector and apply the schema
+createdb company_brain 2>/dev/null || true
+export DATABASE_URL=postgresql://localhost:5432/company_brain
+psql "$DATABASE_URL" -f packages/core/src/schema.sql
 
 # 2. Install dependencies
 npm install
 
-# 3. Set environment variables
-export DATABASE_URL=postgresql://brain:brain@localhost:5432/company_brain
-export OPENAI_API_KEY=sk-...          # for embeddings
-export ANTHROPIC_API_KEY=sk-ant-...   # for LLM extraction
+# 3. Build the packages
+npm run build
 
-# 4. Run the demo
-npx tsx tests/demo.ts
+# 4. Set environment variables
+export OPENAI_API_KEY=sk-...          # embeddings + default LLM
+export ANTHROPIC_API_KEY=sk-ant-...   # optional long-context/explicit Anthropic fallback
 
-# 5. Or start the REST API
+# 5. Run the operating-memory smoke suite
+node tests/operating-memory-suite.mjs
+
+# 6. Or start the REST API
 npx company-brain --rest
 ```
+
+Prefer Docker for Postgres? Use `docker compose up -d postgres` and set `DATABASE_URL=postgresql://brain:brain@localhost:5432/company_brain` instead.
 
 ## Usage
 
@@ -67,7 +79,7 @@ import { Brain } from '@company-brain/core';
 const brain = new Brain({
   database: 'postgresql://brain:brain@localhost:5432/company_brain',
   embedding: { provider: 'openai' },
-  llm: { provider: 'anthropic' },
+  llm: { provider: 'openai' },
 });
 
 await brain.init();
@@ -121,7 +133,40 @@ const full = await brain.getEntity(alice.id, {
 }
 ```
 
-Exposes 6 tools: `ingest`, `search`, `get_entity`, `find_entity`, `get_facts`, `extraction_stats`.
+Exposes tools across six categories:
+
+**Data:**
+- `ingest` — ingest text content, extract entities and facts
+- `search` — hybrid search (semantic + keyword + graph + temporal + community)
+- `answer` — retrieve evidence and return a grounded answer with citations
+- `search_memory` — search organizational memory objects such as decisions, commitments, risks, and open questions
+- `list_memory` — list recent organizational memory objects with kind/status filters
+- `get_entity` — get an entity by ID with facts, related entities, timeline
+- `find_entity` — fuzzy-match an entity by name
+- `get_facts` — get facts between entities, supports temporal queries
+- `extraction_stats` — fail-improve loop statistics
+- `improvement_proposals` — audited proposals for schema, extraction, canonicalization, and skill evolution
+- `propose_canonical_clusters` — graph-level entity/relation cluster proposals
+- `run_evals` — DB-backed baseline or pressure evals through live ingest, retrieval, and answer scoring
+
+**Connectors:**
+- `list_connectors` — show available connector types and configured instances
+- `connect` — configure and authenticate a data source (filesystem, nango, or a custom REST connector)
+- `sync_connector` — pull data from a connected source (incremental by default)
+- `sync_all_connectors` — sync every configured connector at once
+- `save_connector` — create a custom REST API connector from a JSON definition (no code)
+
+**Skills:**
+- `list_skills` — show all skills and the routing table
+- `get_skill` — read a skill's full SOP content
+- `save_skill` — create or update a skill (persists to `~/.company-brain/skills/`)
+- `promote_skills` — draft, validate, and optionally promote skills from improvement proposals
+
+**Security:**
+- `simulate_permission` — explain whether an access context can see a visibility policy
+
+**Meta:**
+- `version` — server version
 
 ### REST API
 
@@ -144,7 +189,19 @@ curl -X POST http://localhost:3333/api/search \
   -d '{"query": "Acme deal"}'
 ```
 
-Full endpoint list: `POST /api/ingest`, `POST /api/search`, `GET /api/entities/:id`, `GET /api/entities/find/:name`, `GET /api/facts/:sourceId`, `POST /api/schema`, `GET /api/stats`, `GET /api/stats/patterns`, `POST /api/connectors`, `POST /api/connectors/:id/sync`, `GET /api/connectors`, `POST /api/webhooks/:type`, `GET /api/skills`, `GET /api/skills/:id`, `POST /api/skills`, `GET /api/health`.
+Full endpoint list: `POST /api/ingest`, `POST /api/search`, `POST /api/answer`, `POST /api/memory/search`, `POST /api/memory/list`, `GET /api/entities/:id`, `GET /api/entities/find/:name`, `GET /api/facts/:sourceId`, `GET /api/graph`, `POST /api/schema`, `GET /api/stats`, `GET /api/stats/patterns`, `GET /api/improvement-proposals`, `POST /api/canonical-clusters`, `POST /api/skills/promote`, `POST /api/evals/run`, `POST /api/permissions/simulate`, `POST /api/connectors`, `POST /api/connectors/:id/sync`, `GET /api/connectors`, `GET /api/webhook-sources`, `POST /api/webhook-sources`, `POST /api/webhooks/receive/:source`, `POST /api/webhooks/ingest`, `POST /api/webhooks/:type`, `GET /api/skills`, `GET /api/skills/:id`, `POST /api/skills`, `GET /api/health`.
+
+### Graph Visualization
+
+Generate `graph.html` when you want a local interactive force-directed graph of all entities and relationships. The generated file is a local artifact and is not committed.
+
+```bash
+# Build, then generate and open graph.html
+npm run build
+npx tsx tools/visualize.ts --group default
+```
+
+For API-backed graph data, start the REST API and call `GET /api/graph`, which returns all visible entities and active facts as `{nodes, links}`.
 
 ---
 
@@ -163,9 +220,11 @@ Full endpoint list: `POST /api/ingest`, `POST /api/search`, `GET /api/entities/:
 ┌─────────────────────────────────────────────────────────────┐
 │                     Ingestion Pipeline                       │
 │                                                             │
-│  Raw Text ──▶ Episode (immutable provenance)                │
+│  Raw Text ──▶ LLM Triage (drop / ephemeral / durable)        │
 │      │                                                      │
-│      ├──▶ Deterministic Pre-scan                            │
+│      ├──▶ Episode (immutable provenance, if retained)       │
+│      │                                                      │
+│      ├──▶ Structural Pre-scan                               │
 │      │    (emails, @mentions, URLs, known entity matching)  │
 │      │                                                      │
 │      ├──▶ LLM Extraction (primary)                          │
@@ -192,13 +251,18 @@ Full endpoint list: `POST /api/ingest`, `POST /api/search`, `GET /api/entities/:
 │  Tables: entities, facts, episodes, entity_aliases          │
 │  Indexes: trigram, HNSW vector, tsvector, temporal          │
 ├─────────────────────────────────────────────────────────────┤
-│                     Hybrid Search                           │
+│                Three-Tier Search Engine                     │
 │                                                             │
-│  1. Semantic  (pgvector HNSW cosine on embeddings)          │
-│  2. Keyword   (tsvector full-text with websearch_to_tsquery)│
-│  3. Graph     (BFS from seed entities, 1-hop traversal)     │
-│  4. Temporal  (point-in-time filtering via valid_at window) │
+│  Query Router ──▶ classify intent ──▶ select tier           │
+│                                                             │
+│  Tier 1 (<100ms): Keyword + Graph entity lookup             │
+│  Tier 2 (<500ms): Semantic + Keyword + Graph Traversal      │
+│                   + Personalized PageRank + Communities      │
+│  Tier 3 (1-5s):  Query Decomposition ──▶ Sub-query engine   │
+│                                                             │
 │     ──▶ Reciprocal Rank Fusion (k=60) ──▶ Recency Boost    │
+│             └──▶ Source Context Expansion                   │
+│                  (facts/memory pull parent episodes)        │
 ├─────────────────────────────────────────────────────────────┤
 │                    Skill Resolver                           │
 │                                                             │
@@ -228,9 +292,9 @@ Most knowledge systems store either documents (RAG) or triples (traditional KG).
 
 Company Brain uses three primitives that solve both.
 
-**Episodes** are raw data: the meeting transcript, the Slack message, the document. They are immutable and timestamped. This is your audit trail. Every fact traces back to an episode.
+**Episodes** are raw data: the meeting transcript, the Slack message, the document. They are immutable and timestamped. This is your audit trail. Every fact traces back to an episode. Episodes also carry source-specific metadata and visibility policies inherited from Slack channels, CRM owners, analytics workspaces, call participants, or explicit ACLs. Normalization preserves the raw source text even when structured turns, replies, action items, or provider fields are available, so retrieval can recover adjacent context that extraction may not compress into a single fact.
 
-**Entities** are the nodes: people, companies, projects, decisions, concepts. Each entity has a name, type, summary (auto-maintained from facts), attributes (JSONB), and a vector embedding for semantic search. Entity deduplication uses trigram similarity (`pg_trgm`) plus an alias table that maps surface forms ("Bob", "Robert Smith", "bob@acme.com") to the canonical entity.
+**Entities** are the nodes: people, companies, projects, decisions, concepts. Each entity has a name, type, summary (auto-maintained from public facts), attributes (JSONB), visibility policy, and a vector embedding for semantic search. Entity deduplication uses trigram similarity (`pg_trgm`) plus an alias table that maps surface forms ("Bob", "Robert Smith", "bob@acme.com") to the canonical entity. Graph-level clustering proposes duplicate communities that pairwise resolution leaves behind.
 
 **Facts** are the edges: temporal relationships between entities. This is the core innovation. A fact has:
 
@@ -242,6 +306,8 @@ Company Brain uses three primitives that solve both.
 | `valid_at` | When this fact became true |
 | `invalid_at` | When this fact was superseded (NULL = still true) |
 | `confidence` | 0.0-1.0 extraction confidence |
+| `evidence` | Quote, offsets, extractor, and confidence rationale |
+| `visibility` | Row-level ACL inherited from source data |
 | `source_episode_id` | Provenance: which raw data produced this fact |
 | `fact_embedding` | Vector for semantic search |
 
@@ -253,7 +319,8 @@ When new information contradicts an existing fact, the old fact's `invalid_at` i
 -- Entities: nodes in the graph
 entities (
   id UUID, group_id TEXT, entity_type TEXT, name TEXT,
-  summary TEXT, attributes JSONB, name_embedding vector(1536)
+  summary TEXT, attributes JSONB, visibility JSONB,
+  name_embedding vector(1536)
 )
 
 -- Facts: temporal edges
@@ -261,19 +328,26 @@ facts (
   id UUID, group_id TEXT,
   source_entity_id UUID, target_entity_id UUID,
   relation TEXT, fact_text TEXT, fact_embedding vector(1536),
+  evidence JSONB, extractor TEXT, visibility JSONB,
   valid_at TIMESTAMPTZ, invalid_at TIMESTAMPTZ,
-  confidence FLOAT, source_episode_id UUID
+  confidence FLOAT, source_episode_id UUID, metadata JSONB
 )
 
 -- Episodes: raw provenance
 episodes (
   id UUID, group_id TEXT, source_type TEXT, source_id TEXT,
-  content TEXT, content_embedding vector(1536),
+  content TEXT, content_embedding vector(1536), metadata JSONB, visibility JSONB,
   valid_at TIMESTAMPTZ
 )
 
 -- Aliases: entity deduplication
 entity_aliases (entity_id UUID, alias TEXT, alias_type TEXT)
+
+-- Canonicalization + skill evolution
+graph_review_queue (legacy audit table; not an operational inbox)
+canonical_clusters (cluster_type TEXT, canonical_id TEXT, member_ids TEXT[], status TEXT)
+skill_promotions (skill_id TEXT, status TEXT, proposal JSONB, test_results JSONB)
+audit_log (actor TEXT, action TEXT, resource_type TEXT, metadata JSONB)
 ```
 
 **Why these indexes matter:**
@@ -305,6 +379,127 @@ Entity types and relation types are stored in the database (not hardcoded), scop
 
 Every table has a `group_id` column. A group is a workspace: one brain can serve multiple teams, projects, or tenants. The default group is `'default'`. All queries are group-scoped. This is how you run one Postgres instance for an entire company without data leaking between teams.
 
+In SDK/REST/MCP calls this appears as `groupId`. If you ingest with `groupId: 'acme'`, you must search/answer with `groupId: 'acme'` too. Otherwise the query reads the default group and may look empty even though another group has data.
+
+Example:
+
+```typescript
+await brain.ingest({
+  groupId: 'customer-success',
+  content: 'Apex Health SSO is blocked on SCIM mapping.',
+  sourceType: 'raw_note',
+});
+
+await brain.answer({
+  groupId: 'customer-success',
+  query: 'What is blocking Apex Health?',
+});
+```
+
+For local manual testing, omit `groupId` everywhere and clear the database before each run. Custom group IDs are only useful when you need isolated test tenants without wiping the database.
+
+### Security and Source Permissions
+
+Episodes, entities, and facts include a `visibility` JSONB policy. That policy travels with extracted graph records, so if a private Slack message creates a fact, the fact remains private too.
+
+The security model has four layers:
+
+1. **Tenant isolation with `group_id`**: every table is scoped to a workspace/group. Queries only read from the requested group.
+2. **Row-level visibility policies**: episodes, entities, and facts each carry allowed/denied principals, groups, source ACLs, and classification labels.
+3. **Access-aware retrieval**: search, answer synthesis, graph traversal, PageRank, temporal queries, `getEntity`, `findEntity`, and `getFacts` all apply the same visibility filter.
+4. **Permission simulation and audit**: `simulatePermission()` explains why an access context can or cannot see a policy, while `audit_log` records security-sensitive mutations and canonicalization decisions.
+
+The most important default: **missing `access` is public-only**. If a row has `allowedGroups`, `allowedPrincipals`, or source ACL allow rules, it will not be returned unless the caller provides matching access. Internal/admin jobs must explicitly pass `access: { bypass: true }`.
+
+Classification labels are descriptive only. They do not invent access rules. Durable access control must come from source-native ACL metadata, explicit `allowedGroups`/`allowedPrincipals`, or source connector permissions. MCP ingest returns `visibilityWarnings` when a classification looks restricted but has no explicit access policy.
+
+Visibility can be supplied directly at ingest:
+
+```typescript
+await brain.ingest({
+  content: 'SEC ONLY incident 42: token path was /legacy/ops/admin_token',
+  sourceType: 'slack_message',
+  visibility: {
+    allowedGroups: ['security'],
+    deniedGroups: ['product'],
+    classification: 'security_incident',
+  },
+});
+```
+
+Then retrieval must include matching access:
+
+```typescript
+// Can see security-only facts
+await brain.answer({
+  query: 'What was the token path in incident 42?',
+  access: { principalId: 'nora', groups: ['security'] },
+});
+
+// Public-only by default; restricted facts are hidden
+await brain.answer({
+  query: 'What was the token path in incident 42?',
+});
+
+// Explicit internal/admin bypass for maintenance jobs only
+await brain.search({
+  query: 'incident 42',
+  access: { bypass: true },
+});
+```
+
+Policies support:
+
+| Field | Meaning |
+|-------|---------|
+| `allowedPrincipals` | Specific users/service principals that can read the row |
+| `deniedPrincipals` | Specific users/service principals that are always blocked |
+| `allowedGroups` | Groups/teams/roles that can read the row, e.g. `security` |
+| `deniedGroups` | Groups/teams/roles that are always blocked |
+| `classification` | Label such as `public`, `candidate_feedback`, `security_incident`, or `confidential` |
+| `sourceSystem` | Provider that produced the ACL, e.g. `slack`, `hubspot`, `google_drive` |
+| `sourceAcl` | Provider-native ACL entries for users, groups, channels, workspaces, roles, or accounts |
+| `inheritedFrom` | Source record/channel/document ID that the policy came from |
+
+Normalizers can also derive visibility from source payloads:
+
+- Slack: workspace, channel, thread, user, files, reactions, blocks, channel groups
+- Calls/meetings: participants, speaker IDs, transcript turns, action items, decisions
+- Analytics: workspace/project, event identity, dimensions, properties
+- CRM: owner, team, stage/status, associations, record fields
+
+Source ACL examples:
+
+```typescript
+// Slack channel ACL derived from metadata
+{
+  sourceSystem: 'slack',
+  sourceAcl: [
+    { provider: 'slack', id: 'C_SEC', type: 'channel', access: 'allow' },
+    { provider: 'slack', id: 'U_BAD', type: 'user', access: 'deny' },
+  ],
+}
+
+// Matching access
+{
+  principalId: 'nora',
+  groups: ['slack:channel:C_SEC', 'security'],
+  sourceAccounts: { slack: 'U_NORA' },
+}
+```
+
+Use `simulatePermission()` or `POST /api/permissions/simulate` when debugging access:
+
+```typescript
+brain.simulatePermission(
+  { allowedGroups: ['security'] },
+  { principalId: 'pm-user', groups: ['product'] },
+);
+// => { allowed: false, reason: 'No allow policy matched', ... }
+```
+
+This means the same data can safely support public answers, team-restricted answers, source-native ACL enforcement, and admin maintenance without relying on the calling agent to remember what should be hidden.
+
 ---
 
 ## The Extraction Pipeline
@@ -331,37 +526,45 @@ When you call `brain.ingest(input)`:
 
 **Step 0: Episode storage.** The raw content is stored as an immutable episode with its embedding. This happens before extraction. Even if extraction fails, you have the raw data.
 
-**Step 1: Deterministic pre-scan.** Fast regex pass (~1ms) catches:
+**Step 1: Source normalization + permissions.** Source-shaped payloads are rendered into extraction-ready text while preserving structured metadata. Slack threads/files/reactions, call diarization, analytics dimensions, and CRM associations are kept in metadata. Visibility policies are inferred from source permissions when available and inherited by extracted graph records.
+
+**Step 2: Organizational memory derivation.** The episode is also converted into first-class organizational memory objects: interactions, decisions, rationale, commitments, open questions, risks, and value-creating objects. These are universal org primitives, not customer-domain hardcodes. Each object keeps source episode provenance, evidence quotes, confidence, timestamps, and inherited visibility.
+
+**Step 3: Deterministic pre-scan.** Fast regex pass (~1ms) catches:
 - Email addresses, which become person entities with `{ email }` attribute
 - @mentions, which become person entities with `{ handle }` attribute
 - Known entity matching: any entity name already in the graph (via alias table) gets flagged at 0.95 confidence
 
 This is not the extraction engine. This is a metadata supplement.
 
-**Step 2: LLM extraction.** The content is sent to Claude (Sonnet) or GPT with a structured output prompt. The prompt includes:
+**Step 4: LLM extraction.** The content is sent to Claude (Sonnet) or GPT with a structured output prompt. The prompt includes:
 - Entity type definitions and relationship types
+- Relation cardinality and invalidation policies
 - Confidence calibration guidelines (0.95 for explicit, 0.8 for implied, 0.6 for inferred)
+- Evidence quote and confidence rationale requirements
 - **Existing graph context**: facts about known entities mentioned in the text, so the LLM can detect changes ("Alice was VP, now the text says CRO" means this is a role change, not a duplicate)
 
-The LLM returns structured JSON with entities, facts, temporal information, and per-item confidence scores.
+The LLM returns structured JSON with entities, facts, temporal information, evidence, and per-item confidence scores.
 
-**Step 3: Merge.** LLM results are the authority. Deterministic results add structured attributes (email addresses, handles) to matching LLM entities. If the deterministic scan found something the LLM missed entirely (rare), it gets appended.
+**Step 5: Merge.** LLM results are the authority. Deterministic results add structured attributes (email addresses, handles) to matching LLM entities. If the deterministic scan found something the LLM missed entirely (rare), it gets appended.
 
-**Step 4: Resolution.** Each extracted entity is resolved against the existing graph:
+**Step 6: Resolution.** Each extracted entity is resolved against the existing graph:
 1. Exact alias match (alias table, instant)
-2. Trigram similarity match (pg_trgm, `similarity() > 0.7`)
-3. No match: create new entity and register alias
+2. Type-aware trigram/embedding match
+3. Ambiguous match: enqueue review instead of unsafe merge
+4. No match: create new entity and register alias
 
 Each extracted fact is checked for contradictions:
-- Same source/target/relation, same text: **skip** (duplicate)
-- Same source/target, exclusive relation (works_at, founded), different text: **invalidate old fact**, create new one
-- Same source/target, non-exclusive relation: **create alongside** existing
+- Duplicate fact: **skip**
+- Relation cardinality says one current fact should exist: **invalidate old fact** according to policy
+- Non-exclusive relation: **create alongside** existing
+- Missing/ambiguous entity grounding: **enqueue review**
 
-**Step 5: Logging.** Every extraction is logged to `extraction_log` with method, entities/facts extracted, confidence, and duration. This powers the observability system.
+**Step 7: Logging and improvement loop.** Every extraction is logged to `extraction_log` with method, entities/facts extracted, confidence, and duration. Review items, improvement proposals, canonical clusters, and skill promotions use this trail to improve the system over time.
 
 ### Fallback Mode
 
-When no LLM API key is configured, the system falls back to deterministic-only extraction. This is useful for testing and development. The deterministic layer catches enough structured data to be functional, but it will miss nuanced relationships.
+When no LLM API key is configured, triage fails closed to ephemeral retention and semantic graph/memory extraction is skipped. The system does not use regex or deterministic semantic fallbacks to pretend it understands organizational meaning.
 
 ### Graph-Aware Extraction
 
@@ -384,38 +587,176 @@ This means the LLM can:
 
 ## The Search Engine
 
-Search uses four retrieval methods run in parallel, then fused via Reciprocal Rank Fusion.
+The search engine uses a three-tier architecture inspired by state-of-the-art graph RAG systems ([HippoRAG](https://arxiv.org/abs/2405.14831), [Microsoft GraphRAG](https://arxiv.org/abs/2404.16130), [LightRAG](https://arxiv.org/abs/2410.05779), [Zep/Graphiti](https://arxiv.org/abs/2501.13956)). Queries are automatically routed to the optimal retrieval strategy, using LLMs for understanding and synthesis, embeddings and SQL for retrieval.
 
-### Why Four Methods
+### Design Philosophy: LLMs for Thinking, Embeddings for Finding
 
-No single retrieval method works for everything:
+The key insight from SOTA graph RAG research is that **LLMs and embeddings serve different purposes in retrieval**. Using regex patterns or keyword matching for query understanding is fragile — it fails on lowercase names, abbreviations, informal language, non-English text. Using LLMs for vector search is wasteful — cosine similarity is faster and cheaper.
 
-| Query | Best Method | Why |
-|-------|-------------|-----|
-| "enterprise SaaS deals" | Semantic | Conceptual similarity, not exact keywords |
-| "alice@acme.com" | Keyword | Exact string match, no semantic meaning |
-| "What's connected to Acme?" | Graph | Follow edges from a known entity |
-| "What did we know in March?" | Temporal | Filter by validity window |
+Company Brain splits the work accordingly:
 
-Running all four and fusing results means no query type falls through the cracks.
+| Component | Method | Why |
+|-----------|--------|-----|
+| **Query understanding** | LLM (Claude Sonnet 4.6 / GPT-5.4 mini) | "what's going on with that acme situation" can't be parsed by regex |
+| **Entity extraction from queries** | LLM | Catches any casing, abbreviations, partial names, implied references |
+| **Seed entity discovery** | Embedding similarity (primary) + trigram + FTS | Cosine similarity on entity `name_embedding` vectors — no hardcoded patterns |
+| **Graph traversal** | PostgreSQL recursive CTEs | Pure graph algorithm, no LLM needed |
+| **PageRank** | In-memory power iteration (Float64Array) | Pure math |
+| **Community summaries** | LLM (generated once, cached 5 min) | Need to synthesize scattered facts into coherent descriptions |
+| **Community matching** | Embedding similarity + graph salience | Handles abstract/global queries without lexical overlap rules |
+| **Keyword search** | PostgreSQL `tsvector` FTS | Deterministic, fast, searches entities + facts + episodes |
+| **Semantic search** | Embedding + pgvector HNSW | Vector math, not LLM reasoning |
+| **Result fusion** | Reciprocal Rank Fusion (RRF) | Pure scoring formula |
+| **Query decomposition** | LLM (for complex multi-hop only) | Breaking complex questions into sub-queries needs reasoning |
 
-### How Each Method Works
+### Three-Tier Architecture
 
-**Semantic search** embeds the query via OpenAI `text-embedding-3-large` (1536 dimensions), then uses pgvector's HNSW index to find entities and facts with high cosine similarity. Threshold: 0.3 similarity minimum.
+| Tier | Latency | When Used | Methods |
+|------|---------|-----------|---------|
+| **Tier 1** | <100ms | Simple lookups: "Who is Alice?" | Keyword + Graph + Semantic |
+| **Tier 2** | <500ms | Relationship/analytical/temporal/global queries | Semantic + Keyword + Graph Traversal + PPR + Communities |
+| **Tier 3** | 1-5s | Complex multi-hop reasoning | LLM Decomposition → Sub-query execution through Tier 1/2 |
 
-**Keyword search** uses PostgreSQL's built-in `tsvector` full-text search with `websearch_to_tsquery` (supports natural language queries, not just exact terms). Searches both entity name+summary and fact_text. Score is `ts_rank` weighted by fact confidence.
+### Query Router
 
-**Graph search** first finds "seed entities" that match the query (via fuzzy name matching or full-text), then traverses outward via BFS through connected facts. Returns facts 1 hop away from the seed entities, scored by confidence with a 0.9 discount (slightly lower than direct matches).
+When an LLM config is available, the router makes a single LLM call (Claude Sonnet 4.6 / GPT-5.4 mini, ~200 tokens, <300ms) that does three things at once:
 
-**Temporal filtering** is applied post-fusion. If `asOf` is set, facts are filtered to only those valid at that point in time (`valid_at <= asOf AND (invalid_at IS NULL OR invalid_at > asOf)`).
+1. **Intent classification** — categorizes the query into one of seven intents
+2. **Entity extraction** — pulls out all entity names regardless of casing, abbreviations, or informal references
+3. **Temporal parsing** — identifies time references ("since last month", "as of Q1")
+
+This replaces the rule-based regex/stopword approach with a system that handles natural language reliably. If no LLM is configured, the router uses broad hybrid retrieval rather than semantic regex routing.
+
+| Intent | Example | Tier | Methods |
+|--------|---------|------|---------|
+| `entity_lookup` | "Who is Alice Chen?" | 1 | keyword, graph, semantic |
+| `relationship` | "Who does Alice work with?" | 2 | graph, pagerank, keyword, semantic |
+| `temporal` | "What changed since last month?" | 2 | temporal, keyword |
+| `analytical` | "How many deals in the pipeline?" | 2 | keyword, graph, semantic |
+| `global` | "How's our pipeline looking?" | 2 | community, semantic, keyword |
+| `similarity` | "Find companies similar to Acme" | 2 | semantic |
+| `multi_hop` | "Which deals are at risk due to leadership changes?" | 3 | decompose |
+
+### Retrieval Methods
+
+**Semantic search** embeds the query via OpenAI `text-embedding-3-large` (1536 dimensions), then uses pgvector's HNSW index to find entities and facts with high cosine similarity. Threshold: 0.3 similarity minimum. Included in almost all query routes as a reliable fallback.
+
+**Keyword search** uses PostgreSQL's built-in `tsvector` full-text search with `websearch_to_tsquery`. Searches entity name+summary, fact text, and episode content (raw ingested data). Score is `ts_rank` weighted by fact confidence. Episodes are capped at 5 results and scored at 0.7x to prioritize structured data.
+
+**Graph traversal** uses a multi-signal approach to find seed entities, then walks the knowledge graph using PostgreSQL recursive CTEs. Seed entity discovery runs three strategies **in parallel**:
+
+1. **Embedding similarity** (primary, like HippoRAG/GraphRAG): cosine similarity between the query embedding and entity `name_embedding` vectors. Catches semantic matches like "CTO" → "Chief Technology Officer".
+2. **Trigram similarity** (supplementary): `pg_trgm` matching against entity names + the `entity_aliases` table for character-level fuzzy matching.
+3. **Full-text search** (fallback): FTS with **OR semantics** on entity name + summary.
+
+From the seed entities, a recursive CTE walks outward up to 3 hops. Each hop decays the score by 0.9 (`confidence * 0.9^hop`). Facts are deduplicated by keeping shortest-path occurrences.
+
+**Personalized PageRank (PPR)** — inspired by [HippoRAG (NeurIPS 2024)](https://arxiv.org/abs/2405.14831). Seeds probability from query-relevant entities (found via the same multi-signal seed discovery) and lets it flow through the graph to surface non-obvious, multi-hop connections. Uses power iteration with configurable teleport probability (alpha=0.15), convergence via L1 norm, and handles dangling nodes. Implemented with Float64Array for performance.
+
+**Community search** uses label propagation to detect clusters of related entities in the graph. Each community gets an LLM-generated summary (Claude Sonnet 4.6 / GPT-5.4 mini) describing what the group represents and its key relationships. Summaries are cached in memory for 5 minutes to avoid regeneration on every query. Queries are matched against embedded community representations, then lightly boosted by graph salience from community size and internal edge weight. Singleton entities are filtered out.
+
+**Temporal operators** support five query types:
+- `AS_OF(timestamp)`: What was true at a point in time?
+- `CHANGED_SINCE(timestamp)`: What was created or invalidated recently?
+- `VALID_DURING(start, end)`: What facts overlapped a time range?
+- `ENTITY_TIMELINE(entityId)`: Full chronological history of an entity
+- `RECENT_CONTRADICTIONS`: Pairs of old/new facts where the old was superseded
+
+### Query Decomposition (Tier 3)
+
+Complex multi-hop questions are broken into atomic sub-queries that can each be answered by Tier 1/2 retrieval. Decomposition is LLM-first; without an LLM it falls back to a single broad sub-query instead of regex templates.
+
+Sub-queries have dependency tracking: if sub-query 2 depends on results from sub-query 0, it waits for sub-query 0 to complete and enriches its question with that context. Independent sub-queries run in parallel.
+
+Example decomposition for "Which deals are at risk because of leadership changes?":
+1. `Find all active deals` (entity_lookup)
+2. `Find recent leadership changes` (temporal)
+3. `Which entities from the deals are connected to entities affected by leadership changes?` (relationship, depends on 1+2)
 
 ### Reciprocal Rank Fusion
 
-RRF is how we combine ranked results from different retrieval methods without needing to normalize their scores (which are on incompatible scales: cosine similarity vs. BM25 rank vs. graph distance).
+RRF combines ranked results from different retrieval methods without needing to normalize their incompatible score scales (cosine similarity vs. BM25 rank vs. graph distance vs. PPR probability).
 
 For each result appearing in any list at rank `r`, its RRF score is: `1 / (k + r)` where `k = 60`. If a result appears in multiple lists, its scores are summed. This naturally boosts results that appear across multiple retrieval methods (high agreement = high relevance).
 
-After fusion, a **recency boost** applies a logarithmic decay: `score *= 1 + 0.1 * max(0, 1 - log(ageInDays + 1) / log(365))`. Recent facts get a small bump; old facts are not penalized much. This means "Alice is CRO at Acme" (1 week old) scores slightly higher than "Alice joined Acme" (2 years old), which matches how knowledge workers think about relevance.
+After fusion, a **recency boost** applies a logarithmic decay: `score *= 1 + 0.1 * max(0, 1 - log(ageInDays + 1) / log(365))`. Recent facts get a small bump; old facts are not penalized much.
+
+### Grounded Answer Synthesis
+
+`brain.answer()` and the MCP/REST `answer` tools retrieve evidence first, then synthesize prose from that evidence only. The returned object includes the final `answer`, cited snippets, separated `inference`, explicit `missing` gaps, and answer-level `confidence`.
+
+Answer retrieval now includes first-class organizational memory objects and prefers them for questions about decisions, commitments, owners, blockers, risks, and uncertainty. This helps preserve literal operational details like owners, token paths, dates, and "no decision / not proven" caveats that generic summarization can otherwise wash out.
+
+Answer retrieval also uses **small-to-big / parent-child retrieval**. Precise child results such as facts and memory objects are still ranked normally, but before relevance checking and synthesis the answer layer expands those hits back to their parent source episodes under the same ACL filter. This prevents atomized fact snippets from losing adjacent interaction context, such as the next line of a Slack thread, nearby transcript turns, action items, or caveats in the original call/document.
+
+For debugging and evals, pass `trace: true` to `brain.answer()`. The returned `trace` shows the visible stored episodes, extracted facts/memory, retrieved evidence, source-context expansions, relevance gate decision, and final synthesis mode. This makes failures diagnosable as "dropped at triage", "lost in extraction", "not retrieved", "blocked by relevance", or "omitted during synthesis" instead of relying on brittle keyword checks.
+
+When an LLM is configured, synthesis uses a strict JSON prompt that can only cite returned evidence. Without an LLM, the tool falls back to an extractive evidence summary, so callers still get grounded output instead of unsupported prose.
+
+### Organizational Memory Layer
+
+The temporal graph remains the flexible substrate, but organizational intelligence needs a stable spine. Each ingested episode derives universal memory objects into `organizational_memory`:
+
+| Kind | Purpose |
+|------|---------|
+| `interaction` | Raw source interaction summary with provenance |
+| `decision` | What was decided, rejected, parked, or left undecided |
+| `rationale` | Why something happened or why a choice was made |
+| `commitment` | Owner/action/next-step style obligations |
+| `open_question` | Uncertainty, caveats, unresolved questions, and not-proven claims |
+| `risk` | Incidents, blockers, regressions, concerns, and "do not" constraints |
+| `value_object` | Products, customers, projects, incidents, deals, candidates, features, etc. |
+
+These primitives are not domain-specific hardcodes. "Candidate", "investor", "incident", and "customer" remain dynamic graph concepts. The stable layer only captures how organizations think and operate.
+
+Use it directly through SDK, MCP, or REST:
+
+```typescript
+await brain.searchMemory({
+  query: 'Who owns the Blue Finch import fix?',
+  kinds: ['commitment'],
+});
+
+await brain.listMemory({
+  kinds: ['decision', 'commitment', 'open_question'],
+  limit: 20,
+});
+```
+
+### Cost per Query
+
+| Scenario | LLM Calls | Embedding Calls | Approximate Cost |
+|----------|-----------|-----------------|------------------|
+| Tier 1 (no LLM config) | 0 | 1 | ~$0.0001 |
+| Tier 1 (with LLM routing) | 1 (router) | 1 | ~$0.003 |
+| Tier 2 (with LLM routing) | 1 (router) | 1 | ~$0.003 |
+| Tier 2 global (first query, builds communities) | 1 (router) + N (summaries) | 1 | ~$0.01-0.05 |
+| Tier 2 global (cached communities) | 1 (router) | 1 | ~$0.003 |
+| Tier 3 (decomposition) | 1 (router) + 1 (decomposer) | 1 per sub-query | ~$0.01-0.02 |
+
+### Search Module Map
+
+```
+packages/core/src/search/
+├── index.ts           # Three-tier search engine, RRF fusion, method runner
+├── router.ts          # LLM query understanding + broad hybrid fallback
+├── decomposer.ts      # LLM query decomposition + broad single-query fallback
+├── graph-traversal.ts # Multi-signal seed discovery + recursive CTE traversal
+├── pagerank.ts        # Personalized PageRank (HippoRAG-inspired)
+├── temporal.ts        # AS_OF, CHANGED_SINCE, VALID_DURING, timelines
+└── communities.ts     # Label propagation + LLM summaries + cached search
+```
+
+### SOTA Influences
+
+| System | What We Took | Reference |
+|--------|-------------|-----------|
+| **HippoRAG** (NeurIPS 2024) | Embedding similarity for seed entity discovery, Personalized PageRank for multi-hop reasoning | [Paper](https://arxiv.org/abs/2405.14831) |
+| **Microsoft GraphRAG** | Community detection with LLM-generated summaries for global/abstract queries | [Paper](https://arxiv.org/abs/2404.16130) |
+| **LightRAG** | Dual-level query analysis (entity keywords + conceptual themes), efficient subgraph retrieval | [Paper](https://arxiv.org/abs/2410.05779) |
+| **Zep/Graphiti** | Bi-temporal fact model, multi-pipeline retrieval (semantic + keyword + graph), entity resolution | [Paper](https://arxiv.org/abs/2501.13956) |
+| **RAG-Fusion** | Reciprocal Rank Fusion for combining retrieval methods without score normalization | [Paper](https://arxiv.org/abs/2402.03367) |
+| **Small-to-big retrieval** | Retrieve precise facts/spans, then expand to parent source interactions for answer context | Common production RAG pattern |
 
 ---
 
@@ -435,7 +776,7 @@ Without skills, an agent with access to `brain.search()` and `brain.ingest()` wi
 | `enrich` | On-demand | Build comprehensive entity profiles. Gap analysis by entity type. Cite sources. |
 | `ingest-meeting` | On-demand | Extract attendees, decisions, action items. Verify extraction. Enrich new entities. |
 | `timeline` | On-demand | Show temporal history. Group by period. Highlight contradictions. |
-| `extraction-review` | On-demand | Review extraction stats. Evaluate pattern suggestions. Target >70% deterministic rate. |
+| `extraction-review` | On-demand | Review extraction stats. Evaluate schema, prompt, and eval improvement suggestions. |
 
 ### The Resolver
 
@@ -483,6 +824,20 @@ Save that as `~/.company-brain/skills/deal-tracker.md`. It loads automatically o
 You can also create or edit skills directly from Cursor/Claude Code. The MCP server exposes `save_skill`, `list_skills`, and `get_skill` tools. Ask Claude to "create a skill for triaging support tickets" and it will write the file for you.
 
 To override a built-in skill, create a file with the same id. For example, `~/.company-brain/skills/query.md` replaces the default query skill with your team's custom search protocol.
+
+### Automatic Skill Evolution
+
+The fail-improve loop can also generate skill proposals. `brain.promoteSkills()` takes high-confidence skill proposals, drafts a markdown SOP, validates that the resolver can route to it, and optionally writes it to the skills directory. Every attempt is recorded in `skill_promotions` with the proposal, validation results, status, and file path.
+
+```typescript
+const promotions = await brain.promoteSkills({
+  skillsDir: process.env.BRAIN_SKILLS_DIR,
+  minConfidence: 0.75,
+  autoPromote: true,
+});
+```
+
+Use `promote_skills` over MCP or `POST /api/skills/promote` over REST for the same flow.
 
 **REST API:**
 
@@ -540,31 +895,49 @@ await brain.ingest({
 
 This is the simplest path. If you can get the text, you can ingest it. The extraction pipeline handles the rest.
 
-### Option 2: Built-in Connectors (Slack, Notion, Filesystem)
+### Option 2: Built-in Connectors (Filesystem and Nango)
 
-Connectors handle authentication, pagination, incremental sync, and data normalization for you. Connect a source with one API call, then sync it whenever you want. The brain remembers where it left off between syncs (cursor and timestamp are persisted in Postgres).
+Connectors handle authentication, pagination, incremental sync, and data normalization for you. Connect a source with one call, then sync it whenever you want. The brain remembers where it left off between syncs (cursor and timestamp are persisted in Postgres).
+
+Source-specific fidelity is preserved where possible. Slack sync includes thread replies, blocks, files, attachments, reactions, channel IDs, and channel-derived visibility. Nango records map common provider ACL fields (`permissions`, `acl`, `visibility`, user/group lists) into Brain visibility policies. Generic webhooks and JSON connectors preserve configured metadata fields so downstream normalizers can render them without losing provenance.
+
+**Connect via MCP (Claude Code / Cursor):**
+
+From any MCP chat, the agent can connect and sync data sources directly:
+
+```
+# Connect a local docs folder
+Use company-brain connect with id "docs", type "filesystem", config {"rootDir": "/Users/me/notes"}
+
+# Connect a SaaS source via Nango (handles OAuth, rate limiting, pagination)
+Use company-brain connect with id "team-crm", type "nango", config {"secretKey": "nango-sk-...", "providerConfigKey": "hubspot", "connectionId": "conn-1", "model": "companies"}
+
+# Sync — pulls new data since last sync, extracts entities/facts, builds graph
+Use company-brain sync_connector with id "docs"
+
+# Sync everything at once
+Use company-brain sync_all_connectors
+
+# Create a custom connector for any REST API (no code, persists as JSON)
+Use company-brain save_connector with definition {"id": "linear", "name": "Linear Issues", "url": "https://api.linear.app/v1/issues?{{query}}", "auth": {"type": "bearer", "value": "{{token}}"}, "records": "data.issues", "content": "{{title}}\n\n{{description}}", "sourceType": "linear_issue", "dateField": "createdAt", "pagination": {"type": "cursor", "cursorField": "data.pageInfo.endCursor"}}
+```
 
 **Connect via REST API:**
 
 ```bash
-# Connect Slack
+# Connect a Nango-backed SaaS source
 curl -X POST http://localhost:3333/api/connectors \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "id": "team-slack",
-    "type": "slack",
-    "config": { "token": "xoxb-your-bot-token" }
-  }'
-
-# Connect Notion
-curl -X POST http://localhost:3333/api/connectors \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "id": "team-notion",
-    "type": "notion",
-    "config": { "token": "ntn_your-integration-token" }
+    "id": "team-crm",
+    "type": "nango",
+    "config": {
+      "secretKey": "nango-sk-...",
+      "providerConfigKey": "hubspot",
+      "connectionId": "conn-1",
+      "model": "companies"
+    }
   }'
 
 # Connect a local docs folder
@@ -578,14 +951,14 @@ curl -X POST http://localhost:3333/api/connectors \
   }'
 
 # Sync a connector (fetches new data since last sync)
-curl -X POST http://localhost:3333/api/connectors/team-slack/sync \
+curl -X POST http://localhost:3333/api/connectors/team-crm/sync \
   -H "Authorization: Bearer $TOKEN"
 
-# Sync a specific Slack channel
-curl -X POST http://localhost:3333/api/connectors/team-slack/sync \
+# Sync a specific connector resource
+curl -X POST http://localhost:3333/api/connectors/team-crm/sync \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{ "resource": "C0123CHANNEL" }'
+  -d '{ "resource": "companies" }'
 
 # List all connectors
 curl http://localhost:3333/api/connectors \
@@ -595,20 +968,22 @@ curl http://localhost:3333/api/connectors \
 **Connect via SDK:**
 
 ```typescript
-import { Brain, ConnectorRegistry, SlackConnector, NotionConnector, FilesystemConnector } from '@company-brain/core';
+import { Brain, ConnectorRegistry, FilesystemConnector, NangoConnector } from '@company-brain/core';
 
 const brain = new Brain(config);
 await brain.init();
 
 const registry = new ConnectorRegistry(brain);
-registry.register(new SlackConnector());
-registry.register(new NotionConnector());
 registry.register(new FilesystemConnector());
+registry.register(new NangoConnector());
 
 // Connect sources
-await registry.connect({ id: 'team-slack', type: 'slack', config: { token: 'xoxb-...' } });
-await registry.connect({ id: 'team-notion', type: 'notion', config: { token: 'ntn_...' } });
 await registry.connect({ id: 'docs', type: 'filesystem', config: { rootDir: './docs' } });
+await registry.connect({
+  id: 'team-crm',
+  type: 'nango',
+  config: { secretKey: 'nango-sk-...', providerConfigKey: 'hubspot', connectionId: 'conn-1', model: 'companies' },
+});
 
 // First sync fetches everything
 await registry.syncAll();
@@ -619,33 +994,166 @@ await registry.syncAll();
 
 ### Option 3: Webhooks (real-time push)
 
-For sources that support push notifications (Slack Events API, etc.), point the webhook URL at your brain server. Incoming events are verified, converted to episodes, and ingested automatically.
+Webhooks are the primary way to get real-time data into the brain. Instead of polling APIs, external services push events directly to your brain server. The webhook receiver handles signature verification, payload normalization, and ingestion automatically.
+
+**Architecture:**
 
 ```
-Slack Events API webhook URL:
-  https://your-brain-server.com/api/webhooks/slack
-
-Webhook endpoints skip bearer token auth. They use their own
-signature verification (e.g. Slack HMAC-SHA256 signing secret).
+External Service (GitHub, Slack, Linear, Stripe, etc.)
+        │
+        ▼  HTTP POST
+┌──────────────────────────────────────┐
+│  POST /api/webhooks/receive/:source  │  ← No bearer auth (uses HMAC signatures)
+└──────────┬───────────────────────────┘
+           │
+     ┌─────▼─────┐
+     │  Verify   │  HMAC signature check (if configured)
+     │  Filter   │  Event type filtering (if configured)
+     │  Normalize│  Template-based content extraction
+     └─────┬─────┘
+           │
+     ┌─────▼─────┐
+     │  Ingest   │  brain.ingest() → extraction → knowledge graph
+     └───────────┘
 ```
 
-To enable Slack webhook verification, pass your signing secret when connecting:
+**Step 1: Register a webhook source.** This tells the brain how to handle incoming payloads from a specific service.
 
 ```bash
-curl -X POST http://localhost:3333/api/connectors \
+# Register a GitHub webhook source
+curl -X POST http://localhost:3333/api/webhook-sources \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "id": "team-slack",
-    "type": "slack",
-    "config": {
-      "token": "xoxb-your-bot-token",
-      "signingSecret": "your-slack-signing-secret"
-    }
+    "id": "github-issues",
+    "name": "GitHub Issues",
+    "sourceType": "github_issue",
+    "contentTemplate": "{{action}} issue #{{issue.number}}: {{issue.title}}\n\n{{issue.body}}",
+    "sourceIdTemplate": "github://{{repository.full_name}}/issues/{{issue.number}}",
+    "dateField": "issue.created_at",
+    "secret": "your-github-webhook-secret",
+    "signatureHeader": "x-hub-signature-256",
+    "signatureAlgorithm": "sha256",
+    "signaturePrefix": "sha256=",
+    "eventTypeHeader": "x-github-event",
+    "allowedEvents": ["issues", "issue_comment"],
+    "metadataFields": ["action", "repository.full_name", "sender.login"]
   }'
 ```
 
-When Slack sends an event to `POST /api/webhooks/slack`, the brain verifies the signature, extracts the message content, and runs it through the full ingestion pipeline. No polling needed.
+**Step 2: Point the external service at your webhook URL.**
+
+```
+GitHub webhook URL:
+  https://your-brain-server.com/api/webhooks/receive/github-issues
+
+Webhook endpoints skip bearer token auth. Each source uses its own
+signature verification (HMAC-SHA256, etc.) configured when registered.
+```
+
+That's it. When GitHub sends an event, the brain verifies the signature, extracts the issue content using your template, and ingests it into the knowledge graph.
+
+**More examples:**
+
+```bash
+# Linear webhooks (no signature verification)
+curl -X POST http://localhost:3333/api/webhook-sources \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "id": "linear",
+    "sourceType": "linear_issue",
+    "contentTemplate": "{{action}} {{type}}: {{data.title}}\n\n{{data.description}}",
+    "sourceIdTemplate": "linear://{{data.id}}",
+    "dateField": "data.createdAt"
+  }'
+
+# Slack Events API (with signing secret)
+curl -X POST http://localhost:3333/api/webhook-sources \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "id": "slack-events",
+    "sourceType": "slack_message",
+    "contentTemplate": "{{event.text}}",
+    "sourceIdTemplate": "slack://{{event.channel}}/{{event.ts}}",
+    "dateField": "event.ts",
+    "secret": "your-slack-signing-secret",
+    "signatureHeader": "x-slack-signature",
+    "signatureAlgorithm": "sha256"
+  }'
+
+# Stripe events
+curl -X POST http://localhost:3333/api/webhook-sources \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "id": "stripe",
+    "sourceType": "stripe_event",
+    "contentTemplate": "{{type}}: {{data.object.description}}",
+    "sourceIdTemplate": "stripe://{{id}}",
+    "dateField": "created",
+    "secret": "whsec_your-stripe-secret",
+    "signatureHeader": "stripe-signature"
+  }'
+```
+
+**Raw/open ingest endpoint.** For quick integrations, Zapier, or custom scripts, you can POST directly without registering a source:
+
+```bash
+curl -X POST http://localhost:3333/api/webhooks/ingest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "Customer called about billing issue with invoice #1234",
+    "sourceType": "support_call",
+    "sourceId": "call://2024-01-15/1234"
+  }'
+```
+
+**Local development with ngrok.** External services like GitHub, Slack, and Stripe can't reach `localhost`. Use [ngrok](https://ngrok.com) to expose your local brain server with a public URL:
+
+```bash
+# Start your brain server
+npx company-brain --rest --port 3333
+
+# In another terminal, start ngrok
+ngrok http 3333
+```
+
+ngrok gives you a public URL like `https://a1b2c3d4.ngrok-free.app`. Use that as your webhook base URL:
+
+```
+GitHub webhook URL:
+  https://a1b2c3d4.ngrok-free.app/api/webhooks/receive/github-issues
+
+Slack Events API request URL:
+  https://a1b2c3d4.ngrok-free.app/api/webhooks/receive/slack-events
+
+Raw ingest:
+  https://a1b2c3d4.ngrok-free.app/api/webhooks/ingest
+```
+
+The ngrok URL changes each time you restart (unless you're on a paid plan with reserved domains), so update your webhook URLs in the external services accordingly. For production, deploy behind a stable domain with HTTPS.
+
+**Auto-normalization.** If you don't provide a `contentTemplate`, the receiver automatically looks for common fields (`content`, `text`, `message`, `body`, `description`, `title`, `subject`) and builds a reasonable text representation. For truly unknown payloads, it serializes the entire JSON as content.
+
+**Webhook source config reference:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `id` | Yes | Unique source ID |
+| `name` | No | Human-readable name (defaults to id) |
+| `sourceType` | Yes | Episode sourceType |
+| `contentTemplate` | No | Content template with `{{field}}` placeholders |
+| `sourceIdTemplate` | No | Source ID template (for dedup) |
+| `dateField` | No | Dot-path to timestamp field |
+| `secret` | No | HMAC secret for signature verification |
+| `signatureHeader` | No | Header containing signature |
+| `signatureAlgorithm` | No | `sha256` (default) or `sha1` |
+| `signaturePrefix` | No | Prefix before hex digest (e.g., `sha256=`) |
+| `eventTypeHeader` | No | Header containing event type |
+| `allowedEvents` | No | Only process these event types |
+| `metadataFields` | No | Dot-paths to extract into metadata |
+| `groupId` | No | Workspace/tenant group |
+
+**Legacy connector webhooks** still work at `POST /api/webhooks/:type` (e.g., `/api/webhooks/slack`) for connectors that implement `handleWebhook()`. The new webhook receiver at `/api/webhooks/receive/:source` is the recommended path for all new integrations.
 
 ### Custom Connectors (JSON config, no code)
 
@@ -776,22 +1284,33 @@ Every extraction is logged to the `extraction_log` table:
 const stats = await brain.getExtractionStats();
 // {
 //   totalExtractions: 847,
-//   deterministicHits: 0,     // in LLM-first mode, these are rare
+//   deterministicHits: 0,     // structural pre-scan hits only
 //   llmFallbacks: 0,
 //   deterministicRate: 0,
-//   topMissPatterns: [...]
+//   topMissPatterns: [...]    // recurring areas to review
 // }
 ```
 
-The `suggestPatterns()` function analyzes successful LLM extractions to find recurring patterns that could be added as deterministic pre-scan rules:
+The `getSuggestedPatterns()` compatibility API analyzes recurring LLM extraction behavior and returns schema, prompt, and eval coverage suggestions:
 
 ```typescript
-const patterns = await brain.getSuggestedPatterns(5);
-// [{ entityType: 'company', suggestedPattern: '/acquired ([A-Z][\w\s]+)/g',
-//    examples: ['Acme Corp', 'BigTech Inc'], occurrences: 12 }]
+const suggestions = await brain.getSuggestedPatterns(5);
+// [{ entityType: 'company', suggestion: 'Review ontology descriptions and add eval cases for acquisition language', examples: [...] }]
 ```
 
-This is the **fail-improve loop** from gbrain. The system identifies what the LLM handles repeatedly and suggests deterministic shortcuts a developer can review and approve.
+This is the **fail-improve loop** adapted for LLM-first extraction. It does not generate semantic regex rules; it points developers toward better ontology guidance, prompts, and evals.
+
+Improvement proposals extend this into audited changes:
+
+```typescript
+const proposals = await brain.getImprovementProposals();
+const clusters = await brain.proposeCanonicalClusters({ minConfidence: 0.85 });
+const evalResults = await brain.runEvals(allEvalFixtures);
+```
+
+- `getImprovementProposals()` suggests schema, extraction, canonicalization, and skill changes.
+- `proposeCanonicalClusters()` applies high-confidence graph-level canonicalization immediately, returns ambiguous clusters inline, and logs low-confidence candidates as telemetry.
+- `runEvals()` runs DB-backed fixtures through live ingest, retrieval, permission checks, and answer scoring; built-in fixtures include baseline domains plus messy pressure cases for aliases, noisy source text, contradictions, and ACL leaks. For live debugging, answer traces expose the full path from retained episodes to extracted facts/memory, retrieved evidence, source-context expansion, relevance gating, and final answer synthesis.
 
 ---
 
@@ -832,7 +1351,7 @@ Company Brain invalidates the old fact instead. The old fact's `invalid_at` time
 - `getFacts(aliceId, { asOf: new Date('2024-03-16') })` shows what was true on March 16
 - `getFacts(aliceId)` shows only current facts
 
-The contradiction detection happens during resolution: for **exclusive relations** (works_at, founded, where a person can only work at one company at a time), a new fact with the same relation type automatically invalidates the old one. For **non-exclusive relations** (mentions, related_to), new facts are added alongside existing ones.
+The contradiction detection happens during resolution using relation metadata. Each relation type can declare cardinality (`many`, `one_per_source`, `one_per_target`, `one_between_pair`) and an invalidation policy (`never`, `always`, `llm`). A relation like `works_at` can supersede older current facts for the same person, while non-exclusive relations like `mentions` and `related_to` coexist.
 
 ### Why Skills (Not Just an API)
 
@@ -873,18 +1392,40 @@ company-brain/
 │   │   │   ├── schema.sql              # Postgres schema (pgvector + temporal + trgm)
 │   │   │   ├── db.ts                   # Connection management (postgres.js)
 │   │   │   ├── embedding.ts            # OpenAI embeddings + cosine similarity
+│   │   │   ├── normalization.ts         # Source-specific normalization + ACL inheritance
+│   │   │   ├── security.ts              # Visibility policies, permission simulation, SQL filters
 │   │   │   ├── extraction/
 │   │   │   │   ├── index.ts            # Pipeline orchestrator (LLM-first)
-│   │   │   │   ├── deterministic.ts    # Pre-scan: regex for emails, mentions, roles
-│   │   │   │   ├── llm.ts             # Primary extractor: Claude/GPT structured output
+│   │   │   │   ├── deterministic.ts    # Pre-scan: emails, mentions, URLs, known entities
+│   │   │   │   ├── llm.ts             # Primary extractor: GPT/Claude structured output
 │   │   │   │   ├── resolver.ts         # Entity dedup + fact contradiction detection
-│   │   │   │   └── fail-improve.ts     # Extraction logging + pattern suggestion
+│   │   │   │   └── fail-improve.ts     # Extraction logging + prompt/schema/eval suggestions
 │   │   │   ├── search/
-│   │   │   │   └── index.ts            # Hybrid search: semantic+keyword+graph+temporal
+│   │   │   │   ├── index.ts            # Three-tier search engine + RRF
+│   │   │   │   ├── router.ts           # LLM/rule query routing
+│   │   │   │   ├── decomposer.ts       # Multi-hop query decomposition
+│   │   │   │   ├── graph-traversal.ts  # Recursive CTE graph traversal
+│   │   │   │   ├── pagerank.ts         # Personalized PageRank
+│   │   │   │   ├── temporal.ts         # AS_OF, CHANGED_SINCE, timelines
+│   │   │   │   └── communities.ts      # Label propagation + summaries
+│   │   │   ├── answer/
+│   │   │   │   ├── synthesis.ts        # Grounded answer synthesis + citations
+│   │   │   │   └── index.ts
+│   │   │   ├── memory/
+│   │   │   │   └── index.ts            # Organizational memory derivation/search
+│   │   │   ├── graph/
+│   │   │   │   ├── clustering.ts       # Entity/relation canonical cluster proposals
+│   │   │   │   └── index.ts
+│   │   │   ├── eval/
+│   │   │   │   ├── harness.ts          # Fixture scoring and suite runner
+│   │   │   │   ├── db-adapter.ts       # Live Brain-backed eval adapter
+│   │   │   │   ├── fixtures.ts         # Built-in multi-domain gold fixtures
+│   │   │   │   └── index.ts
 │   │   │   ├── skills/
 │   │   │   │   ├── types.ts            # Skill, SkillMatch, ResolverConfig
 │   │   │   │   ├── resolver.ts         # Intent to skill matching
 │   │   │   │   ├── loader.ts           # Load/save skills from markdown files
+│   │   │   │   ├── evolution.ts         # Draft/validate/promote skills from proposals
 │   │   │   │   ├── defaults.ts         # 7 built-in skills (SOPs)
 │   │   │   │   └── index.ts
 │   │   │   └── connectors/
@@ -894,24 +1435,33 @@ company-brain/
 │   │   │       ├── config-loader.ts    # Load connector definitions from directory
 │   │   │       ├── registry.ts         # ConnectorRegistry orchestration
 │   │   │       ├── filesystem.ts       # Markdown/text file connector
-│   │   │       ├── slack.ts            # Slack messages + Events API
-│   │   │       ├── notion.ts           # Notion pages + databases
 │   │   │       ├── nango.ts            # Nango (700+ integrations via REST API)
 │   │   │       └── index.ts
+│   │   │   └── webhooks/
+│   │   │       ├── receiver.ts         # Configurable webhook receiver
+│   │   │       ├── types.ts
+│   │   │       └── index.ts
 │   │   ├── tests/
-│   │   │   ├── extraction.test.ts      # 12 unit tests (no DB)
+│   │   │   ├── extraction.test.ts      # LLM-first extraction + structural pre-scan
 │   │   │   ├── skills.test.ts          # 13 unit tests (no DB)
+│   │   │   ├── eval-harness.test.ts    # Eval scoring + access expectations
+│   │   │   ├── security-normalization.test.ts # ACL + source normalization
+│   │   │   ├── skill-evolution.test.ts # Skill proposal validation
+│   │   │   ├── answer-synthesis.test.ts # Grounded answers + answerability
+│   │   │   ├── triage.test.ts          # LLM-first memory-worthiness triage
 │   │   │   ├── search.test.ts          # 4 unit tests (no DB)
 │   │   │   └── integration.test.ts     # 7 integration tests (needs Postgres)
 │   │   └── package.json
 │   └── server/                          # MCP + REST interfaces
 │       ├── src/
 │       │   ├── index.ts                # CLI entry: --mcp, --rest, --port
-│       │   ├── mcp.ts                  # 6 MCP tools via stdio transport
+│       │   ├── mcp.ts                  # MCP tools via stdio transport
 │       │   └── rest.ts                 # REST API with bearer auth + CORS
 │       └── package.json
 ├── tests/
-│   └── demo.ts                         # Verbose walkthrough with colored logging
+│   ├── demo.ts                         # Verbose walkthrough with colored logging
+│   ├── messy-noise-suite.ts            # Noisy live pressure suite
+│   └── operating-memory-suite.mjs      # Public launch smoke suite against dist
 ├── examples/
 │   └── basic-usage.ts                  # Quick start example
 ├── docker-compose.yml                  # Postgres 16 + pgvector
@@ -924,11 +1474,16 @@ company-brain/
 | File | Purpose | Why It Matters |
 |------|---------|----------------|
 | `core/src/index.ts` | Brain class | The public API. Everything else is implementation detail. |
-| `core/src/schema.sql` | Database schema | Defines the data model: entities, facts, episodes, aliases, extraction_log. All indexes. |
+| `core/src/schema.sql` | Database schema | Defines entities, facts, episodes, aliases, ACLs, audit log, canonical clusters, skill promotions, and indexes. |
 | `core/src/extraction/index.ts` | Pipeline orchestrator | The LLM-first extraction flow. Controls the merge strategy between deterministic and LLM results. |
 | `core/src/extraction/llm.ts` | LLM extractor | The extraction prompt and response parsing. This is where extraction quality lives. |
-| `core/src/extraction/resolver.ts` | Resolution | Entity dedup (trigram + aliases) and fact contradiction detection (exclusive relations). |
-| `core/src/search/index.ts` | Hybrid search | Four retrieval methods + RRF fusion + recency boost. |
+| `core/src/extraction/resolver.ts` | Resolution | Type-aware entity dedup, inline ambiguity reporting, and relation-cardinality contradiction detection. |
+| `core/src/search/index.ts` | Hybrid search | Three-tier search, method routing, RRF fusion, and recency boost. |
+| `core/src/answer/synthesis.ts` | Answer synthesis | First-party grounded answers with citations, source-context expansion, separated inference, and optional eval traces. |
+| `core/src/security.ts` | Security | Visibility policies, source ACL mapping, permission simulation, SQL filters. |
+| `core/src/graph/clustering.ts` | Canonicalization | Graph-level entity/relation cluster proposals. |
+| `core/src/eval/harness.ts` | Evaluation | Multi-domain fixture runner and scoring. |
+| `core/src/skills/evolution.ts` | Skill evolution | Draft/validate/promote skills from improvement proposals. |
 | `core/src/skills/defaults.ts` | Built-in skills | The 7 SOPs that teach agents how to use the brain. |
 | `server/src/mcp.ts` | MCP server | How AI editors (Claude Code, Cursor) connect to the brain. |
 
@@ -950,35 +1505,68 @@ company-brain/
 | MCP server | Yes | Yes | No | No |
 | REST API | Yes | No | No | Yes (SaaS) |
 | Skill/SOP system | Yes | Yes | No | No |
-| Connectors (Slack, Notion, etc.) | Yes | No | No | Partial |
+| Automatic skill promotion | Yes | No | No | No |
+| Connectors (Nango, filesystem, custom REST) | Yes | No | No | Partial |
+| Source permission inheritance | Yes | No | Partial | Yes |
+| DB-backed eval harness | Yes, with pressure corpus | No | No | Unknown |
+| Grounded answer tool | Yes | No | Partial | Partial |
 | Multi-tenant (group isolation) | Yes | No (personal) | No | Yes (SaaS) |
 | Open source | MIT | MIT | Apache 2.0 | Partial |
+
+---
+
+## Coming Soon
+
+- **Production hardening:** schema migrations, hosted deployment templates, auth provider integration, admin UI, metrics dashboards, backup/restore runbooks, and longer soak tests on customer-scale corpora.
+- **LLM-assisted skill routing:** the skill resolver still uses trigger phrases today. The next step is to let an LLM choose from the available skill routing table with evidence and confidence, while keeping trigger phrases as cheap hints rather than the source of truth.
+- **Persistent community index:** community search now uses embedding similarity plus graph salience at query time. Persisting community embeddings/summaries in Postgres will make global/theme retrieval faster and easier to inspect.
+- **More customer-shaped eval corpora:** keep expanding messy source-specific gold datasets for Slack-style threads, call transcripts, CRM records, support tickets, analytics streams, and agent traces.
+- **Proactive memory digests:** move beyond prompt-driven answers by surfacing role-aware decisions, risks, commitments, and workflow changes before someone asks.
 
 ---
 
 ## Testing
 
 ```bash
-# Unit tests (no database needed): 136 tests
+# Unit and integration test suite
 npm test
 
-# Integration tests (needs Postgres)
-docker compose up -d
+# Integration tests use Postgres when available.
+# For local Postgres:
+createdb company_brain 2>/dev/null || true
+export DATABASE_URL=postgresql://localhost:5432/company_brain
+psql "$DATABASE_URL" -f packages/core/src/schema.sql
 npm test
 
-# Verbose demo with colored logging
+# Public launch smoke: mixed interactions, docs, Figma-style notes, ACLs, and no-answer cases
+npm run build
+node tests/operating-memory-suite.mjs
+
+# Bigger noisy pressure test
+npx tsx tests/messy-noise-suite.ts
+
+# Verbose SDK walkthrough
 npx tsx tests/demo.ts
 ```
 
 The test suite covers:
-- **Extraction** (16 tests): entity extraction from emails, @mentions, role patterns, known entities, custom hints. Fact extraction from role patterns, decisions. Confidence assessment heuristics.
+- **Extraction** (15 tests): structural pre-scan, known entity matching, confidence assessment, and LLM-first fallback behavior.
 - **Skills** (13 tests): resolver matching for all 7 skills, custom skill registration, routing table generation, always-on skill detection.
 - **Skill loader** (17 tests): frontmatter parsing, directory loading, save/load round-trip, resolver integration, user overrides.
+- **Skill evolution** (1 test): proposal-to-skill drafting and validation.
 - **Connectors** (14 tests): AbstractConnector validation, FilesystemConnector file discovery, incremental sync, extension filtering.
 - **Nango** (41 tests): config validation, content mapping, pagination, date extraction, metadata extraction, sync end-to-end.
 - **Configurable connectors** (31 tests): definition validation, auth types, template interpolation, pagination modes, since params, directory loading.
+- **Three-tier search** (32 tests): routing, decomposition, graph traversal helpers, PageRank, communities, RRF.
 - **Search** (4 tests): cosine similarity correctness.
+- **Eval harness** (5 tests): fixture scoring, multi-domain baselines, pressure corpus coverage, answer citation scoring, permission-sensitive expectations.
+- **Organizational memory** (1 test): universal memory object derivation, owner/action preservation, literal value preservation.
+- **Answer synthesis** (1 test): grounded answer generation, citations, and answerability gating.
+- **Triage** (3 tests): LLM-first keep/drop/ephemeral decisions and fail-closed behavior.
+- **Graph canonicalization** (3 tests): auto-apply, inline ambiguity, and telemetry-only policy behavior.
+- **Security/normalization** (7 tests): secure public-only defaults, source ACL simulation, Slack metadata rendering, and classification-label safety.
 - **Integration** (7 tests): full pipeline (ingest, extract, resolve, search), contradiction detection, temporal queries, extraction stats.
+- **Live pressure suites**: `tests/operating-memory-suite.mjs` is the recommended public demo for operating knowledge across interactions, docs, Figma-style notes, runbooks, ACLs, and no-answer behavior. `tests/messy-noise-suite.ts` is a larger noisy ingestion pressure test. `tests/demo.ts` is a verbose SDK walkthrough.
 
 ---
 
@@ -987,14 +1575,15 @@ The test suite covers:
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
 | `DATABASE_URL` | Yes | | PostgreSQL connection string |
-| `OPENAI_API_KEY` | For search | | Embeddings (text-embedding-3-large) |
-| `ANTHROPIC_API_KEY` | For extraction | | LLM extraction (Claude Sonnet) |
+| `OPENAI_API_KEY` | For search + default LLM | | Embeddings (`text-embedding-3-large`) and OpenAI-first extraction/triage |
+| `ANTHROPIC_API_KEY` | Optional | | Anthropic fallback or explicit Anthropic model configuration |
 | `BRAIN_AUTH_TOKEN` | No | | REST API bearer token |
 | `BRAIN_GROUP_ID` | No | `default` | Default workspace/tenant |
 | `BRAIN_REST_PORT` | No | `3333` | REST API port |
 | `BRAIN_REST_HOST` | No | `127.0.0.1` | REST API bind address |
 | `BRAIN_SKILLS_DIR` | No | `~/.company-brain/skills` | Directory for user skill files |
 | `BRAIN_CONNECTORS_DIR` | No | `~/.company-brain/connectors` | Directory for custom connector JSON definitions |
+| `BRAIN_WEBHOOKS_DIR` | No | `~/.company-brain/webhooks` | Directory for webhook source configs |
 
 ## Requirements
 

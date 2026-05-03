@@ -110,30 +110,32 @@ export class ConnectorRegistry {
   }
 
   /**
-   * Shared ingest loop. Episodes are ingested one at a time so that
-   * a single failure does not block the rest.
+   * Shared ingest using batch API. Shares the known-entity cache
+   * across the batch, deduplicates episodes, and handles errors gracefully.
    */
   private async ingestEpisodes(
     connectorId: string,
     episodes: import('../types.js').EpisodeInput[],
     groupId?: string,
   ): Promise<SyncResult> {
-    let ingested = 0;
-    let errors = 0;
-
-    for (const episode of episodes) {
-      try {
-        await this.brain.ingest({
-          ...episode,
-          groupId: episode.groupId || groupId,
-        });
-        ingested++;
-      } catch (err) {
-        errors++;
-        console.error(`[registry:${connectorId}] Ingest error:`, err);
-      }
+    if (episodes.length === 0) {
+      return { connector: connectorId, episodes: 0, errors: 0 };
     }
 
-    return { connector: connectorId, episodes: ingested, errors };
+    try {
+      const inputs = episodes.map(ep => ({
+        ...ep,
+        groupId: ep.groupId || groupId,
+      }));
+      const result = await this.brain.ingestBatch(inputs);
+      return {
+        connector: connectorId,
+        episodes: result.ingested,
+        errors: result.total - result.ingested - result.skipped,
+      };
+    } catch (err) {
+      console.error(`[registry:${connectorId}] Batch ingest error:`, err);
+      return { connector: connectorId, episodes: 0, errors: episodes.length };
+    }
   }
 }
