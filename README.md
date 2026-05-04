@@ -38,7 +38,7 @@ Code either passes the test or it doesn't. Knowledge work is subjective. There i
 
 As the corpus grows, so does noise. Without cleanup, you end up searching for needles in a haystack of stale, redundant, or low-value facts.
 
-**Status: partially implemented.** LLM triage drops low-value noise, keeps ephemeral interactions with TTLs, and promotes durable operating knowledge. Temporal invalidation replaces stale facts (VP becomes CRO, old fact gets marked superseded). Queries return only current facts by default. Entity resolution prevents duplicate nodes, graph-level canonical clustering proposes entity/relation merges for review, and recency boost favors recent information. What remains is production-scale compaction, automatic summary condensation, and relevance decay for unreferenced facts.
+**Status: implemented for the reference engine.** LLM triage drops low-value noise, keeps ephemeral interactions with TTLs, and promotes durable operating knowledge. Temporal invalidation replaces stale facts (VP becomes CRO, old fact gets marked superseded). Queries return only current facts by default. Entity resolution prevents duplicate nodes, graph-level canonical clustering proposes entity/relation merges for review, and recency boost favors recent information.
 
 ## Quick Start
 
@@ -764,6 +764,8 @@ packages/core/src/search/
 
 Skills are markdown SOPs (Standard Operating Procedures) that teach AI agents HOW to use the brain. This is the pattern from gbrain: intelligence lives in the skill files, not in hardcoded logic.
 
+The idea is that this repo can be built on and adapted so the brain does not just store knowledge; it notices repeated bottlenecks and turns them into executable operating knowledge for agents. If the system repeatedly sees the same kind of source, review failure, workflow, customer process, or extraction gap, it can propose a new skill, validate that the resolver can route to it, and promote it to a markdown SOP. Over time, those skills can become the foundation for agents that automate full jobs and processes inside a business.
+
 ### Why Skills Matter
 
 Without skills, an agent with access to `brain.search()` and `brain.ingest()` will use them naively, searching with bad queries, ingesting noise, missing the READ then ENRICH then WRITE loop. Skills encode operational knowledge:
@@ -827,7 +829,14 @@ To override a built-in skill, create a file with the same id. For example, `~/.c
 
 ### Automatic Skill Evolution
 
-The fail-improve loop can also generate skill proposals. `brain.promoteSkills()` takes high-confidence skill proposals, drafts a markdown SOP, validates that the resolver can route to it, and optionally writes it to the skills directory. Every attempt is recorded in `skill_promotions` with the proposal, validation results, status, and file path.
+The skill-evolution path is wired through the same fail-improve loop as extraction and evals:
+
+1. Ingest/extraction behavior is logged in `extraction_log`.
+2. `getImprovementProposals()` turns repeated patterns and bottlenecks into proposals, including `kind: "skill"` proposals for recurring workflows.
+3. `brain.promoteSkills()` takes high-confidence skill proposals, drafts a markdown SOP, validates that the resolver can route to it, and optionally writes it to the skills directory.
+4. Every attempt is recorded in `skill_promotions` with the proposal, validation results, status, and file path.
+
+The current implementation is intentionally conservative: it creates proposals and validates/promotes them when explicitly requested rather than silently changing agent behavior in the background. Expanding this into richer closed-loop skill creation is straightforward because the proposal, validation, persistence, and markdown skill-writing path already exists.
 
 ```typescript
 const promotions = await brain.promoteSkills({
@@ -838,6 +847,15 @@ const promotions = await brain.promoteSkills({
 ```
 
 Use `promote_skills` over MCP or `POST /api/skills/promote` over REST for the same flow.
+
+Relevant wiring:
+
+| File | Role |
+|------|------|
+| `packages/core/src/extraction/fail-improve.ts` | Detects recurring extraction/review bottlenecks and emits improvement proposals, including skill proposals. |
+| `packages/core/src/skills/evolution.ts` | Converts skill proposals into markdown SOPs, validates resolver behavior, and writes promoted skills to disk. |
+| `packages/core/src/schema.sql` | Stores promotion attempts in `skill_promotions` for auditability. |
+| `packages/server/src/mcp.ts` | Exposes `improvement_proposals` and `promote_skills` to agents over MCP. |
 
 **REST API:**
 
@@ -1518,6 +1536,7 @@ company-brain/
 ## Coming Soon
 
 - **Production hardening:** schema migrations, hosted deployment templates, auth provider integration, admin UI, metrics dashboards, backup/restore runbooks, and longer soak tests on customer-scale corpora.
+- **Production-scale compaction:** automatic summary condensation and relevance decay for very large, long-lived corpora.
 - **LLM-assisted skill routing:** the skill resolver still uses trigger phrases today. The next step is to let an LLM choose from the available skill routing table with evidence and confidence, while keeping trigger phrases as cheap hints rather than the source of truth.
 - **Persistent community index:** community search now uses embedding similarity plus graph salience at query time. Persisting community embeddings/summaries in Postgres will make global/theme retrieval faster and easier to inspect.
 - **More customer-shaped eval corpora:** keep expanding messy source-specific gold datasets for Slack-style threads, call transcripts, CRM records, support tickets, analytics streams, and agent traces.

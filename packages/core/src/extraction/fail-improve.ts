@@ -181,6 +181,35 @@ export async function proposeImprovements(
         suggestion: pattern.suggestedImprovement,
       },
     });
+
+    proposals.push({
+      id: `skill:${pattern.entityType}`,
+      kind: 'skill',
+      title: `Handle recurring ${pattern.entityType} workflows`,
+      rationale: `The system repeatedly sees ${pattern.entityType} knowledge. A reusable skill can teach agents how to ingest, verify, enrich, and act on this recurring workflow with provenance.`,
+      confidence: Math.min(0.85, 0.45 + pattern.occurrences / 25),
+      evidence: {
+        examples: pattern.examples,
+        occurrences: pattern.occurrences,
+        source: 'extraction_log',
+      },
+      proposedAction: {
+        id: `handle-${pattern.entityType}`,
+        name: `Handle ${pattern.entityType}`,
+        triggers: [
+          `handle ${pattern.entityType}`,
+          `review ${pattern.entityType}`,
+          `ingest ${pattern.entityType}`,
+        ],
+        priority: 65,
+        workflow: [
+          'Search existing graph and memory before writing new knowledge.',
+          'Ingest the new source with provenance and visibility metadata.',
+          'Verify extracted entities, facts, decisions, risks, and commitments.',
+          'Answer or act only with cited evidence, and log gaps for future improvement.',
+        ],
+      },
+    });
   }
 
   for (const row of reviewCounts) {
