@@ -22,25 +22,25 @@ Building an enterprise brain means solving four problems at once.
 
 Your data lives in Slack, Notion, HubSpot, Figma, Linear, Granola, Google Docs, email, and whatever else your team adopted last quarter. None of these systems talk to each other.
 
-**Status: implemented.** The connector framework normalizes any source into timestamped episodes. Built-in connectors handle the filesystem, Nango-backed integrations, configurable REST APIs, and generic webhooks. Nango gives access to 700+ APIs without maintaining provider-specific connector code in this repo. For anything else, drop a JSON config file in `~/.company-brain/connectors/` to define a new REST API connector with no code. Incremental sync is native.
+Company Brain normalizes any source into timestamped episodes. Built-in connectors handle the filesystem, Nango-backed integrations, configurable REST APIs, and generic webhooks. Nango gives access to 700+ APIs without maintaining provider-specific connector code in this repo. For anything else, drop a JSON config file in `~/.company-brain/connectors/` to define a new REST API connector with no code. Incremental sync is native.
 
 ### 2. Unstructured
 
 Raw transcripts, documents, and messages need to become structured knowledge: who, what, when, and how things relate. The brain has to self-organize into a schema that works for your specific business.
 
-**Status: implemented.** LLM-first extraction reads raw text and outputs typed entities, relationships, temporal metadata, and confidence scores. The schema is configurable per workspace with custom entity types and relation types. Entity resolution combines alias matching, trigram similarity, embeddings, and graph-level canonicalization proposals.
+LLM-first extraction reads raw text and outputs typed entities, relationships, temporal metadata, and confidence scores. The schema is configurable per workspace with custom entity types and relation types. Entity resolution combines alias matching, trigram similarity, embeddings, and graph-level canonicalization proposals.
 
 ### 3. Unverifiable
 
 Code either passes the test or it doesn't. Knowledge work is subjective. There is no unit test for "is this a good insight?"
 
-**Status: implemented with ongoing eval expansion.** Every fact and memory object has confidence, evidence, extractor metadata, source episode provenance, visibility policy, and temporal history so you can see what changed and when. Extraction logging, improvement proposals, answer traces, active canonicalization policy, DB-backed eval fixtures, pressure suites, and permission simulation provide a testable feedback loop. What remains is adding larger customer-specific gold datasets and long-running production telemetry.
+Every fact and memory object has confidence, evidence, extractor metadata, source episode provenance, visibility policy, and temporal history so you can see what changed and when. Extraction logging, improvement proposals, answer traces, active canonicalization policy, DB-backed eval fixtures, pressure suites, and permission simulation provide a testable feedback loop. The eval corpus is designed to keep expanding with larger customer-specific gold datasets and long-running production telemetry.
 
 ### 4. Compaction
 
 As the corpus grows, so does noise. Without cleanup, you end up searching for needles in a haystack of stale, redundant, or low-value facts.
 
-**Status: implemented for the reference engine.** LLM triage drops low-value noise, keeps ephemeral interactions with TTLs, and promotes durable operating knowledge. Temporal invalidation replaces stale facts (VP becomes CRO, old fact gets marked superseded). Queries return only current facts by default. Entity resolution prevents duplicate nodes, graph-level canonical clustering proposes entity/relation merges for review, and recency boost favors recent information.
+LLM triage drops low-value noise, keeps ephemeral interactions with TTLs, and promotes durable operating knowledge. Temporal invalidation replaces stale facts (VP becomes CRO, old fact gets marked superseded). Queries return only current facts by default. Entity resolution prevents duplicate nodes, graph-level canonical clustering proposes entity/relation merges for review, and recency boost favors recent information.
 
 ## Quick Start
 
