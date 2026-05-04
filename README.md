@@ -4,6 +4,8 @@
 
 Company Brain turns messy company interactions and documents into a searchable, temporal knowledge graph and organizational memory layer. Feed it meeting transcripts, Slack messages, Notion pages, CRM notes, design files, Linear tickets, emails, call recordings, or anything else your team produces. It extracts entities, relationships, decisions, commitments, risks, policies, and workflow knowledge, keeps provenance and permissions attached, and answers questions with grounded citations.
 
+Built by [Merge Labs](https://www.mergelabs.co/), an AI agency building practical AI infrastructure for growing companies.
+
 Built by studying what works and what doesn't in systems like [gbrain](https://github.com/garrytan/gbrain) (skill-based agents), [Graphiti/Zep](https://github.com/getzep/graphiti) (temporal fact model, contradiction detection), GraphRAG-style retrieval systems, and modern memory products. Company Brain combines those ideas into a single Postgres-native engine.
 
 ## Status
@@ -1610,6 +1612,14 @@ The test suite covers:
 - PostgreSQL 16+ with [pgvector](https://github.com/pgvector/pgvector) and [pg_trgm](https://www.postgresql.org/docs/current/pgtrgm.html)
 - OpenAI API key (for embeddings)
 - Anthropic or OpenAI API key (for LLM extraction)
+
+## Built By
+
+Company Brain is built by [Merge Labs](https://www.mergelabs.co/), an AI agency that helps companies implement AI and develops AI technology for teams that want to move faster. Merge Labs is one of the top 141 OpenAI companies by usage globally, and also incubates and scales SaaS products for fun, including products used by millions of people.
+
+If your company wants help implementing Company Brain or adapting it to your internal systems, reach out to Cael at [cael@mergelabs.co](mailto:cael@mergelabs.co).
+
+Cael
 
 ## License
 
